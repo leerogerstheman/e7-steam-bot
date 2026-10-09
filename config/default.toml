@@ -1,0 +1,228 @@
+# =============================================================================
+# e7bot 配置 —— 第七史诗 Steam / PC 端自动化脚本
+#
+# 所有位置都是**归一化坐标 (0..1)**，相对于游戏窗口客户区（不含标题栏/边框）。
+# 换分辨率、换窗口大小都不用改这里 —— 这是 PC 端相对安卓端最关键的适配。
+#
+# 首次使用顺序：
+#   python run.py doctor            # 环境自检
+#   python run.py capture           # 采模板（必须先做，否则认不出场景）
+#   python run.py probe             # 看识别准不准
+#   python run.py run --dry-run     # 只识别不点击
+#   python run.py run               # 正式跑
+# =============================================================================
+
+[window]
+# 按正则匹配窗口标题。Steam 版可能是 "Epic Seven" / "第七史诗" 等
+title_patterns = ["Epic\\s*Seven", "第七史诗", "에픽세븐", "エピックセブン"]
+exe_patterns = ["EpicSeven", "Epic Seven"]
+min_size = [800, 450]
+# 操作前自动把游戏切到前台（SendInput 只作用于前台窗口）
+auto_activate = true
+activate_settle = 0.35
+# 游戏不在前台就暂停 —— 既保证输入有效，也避免在别的程序上乱点
+pause_when_not_foreground = true
+
+[capture]
+# 按顺序尝试，失败/黑屏自动降级
+backends = ["bettercam", "mss", "printwindow"]
+target_fps = 60
+# 游戏在哪块显示器上就填几（run.py doctor 会告诉你）。DXGI 是按显示器复制的！
+monitor_index = 0
+
+[input]
+# 拟人化程度：>1 更快、更不像人；<1 更慢、更保守
+speed = 1.0
+# 落点高斯抖动（像素）
+move_jitter_px = 2.5
+# 按下时长 / 点击前后停顿（毫秒区间，随机取值）
+click_hold_ms = [45, 110]
+pre_click_delay = [60, 180]
+post_click_delay = [90, 260]
+key_hold_ms = [35, 80]
+# 鼠标移动曲线的弯曲程度与途中的细微抖动
+curve_deviation = 0.18
+tremor = 0.6
+
+[safety]
+# 全局急停键。刻意不用 ESC —— ESC 在第七史诗里是打开菜单的游戏键
+fail_safe_key = "f12"
+# 暂停/继续键
+pause_key = "f9"
+# 最长运行时长（分钟），0 = 不限
+max_runtime_minutes = 480
+# 连续多久认不出场景就自动停机（秒）。防止界面卡死时无限空转
+unknown_scene_timeout = 90.0
+# 连续出错多少次自动停机
+max_consecutive_errors = 8
+# true = 只识别不点击。上线前务必先用它验证模板
+dry_run = false
+
+[templates]
+root = "templates"
+# profile 让你能同时维护多套模板（例如按分辨率或按客户端版本）
+profile = "default"
+# 默认匹配阈值。调低=更容易命中但可能误判
+default_threshold = 0.86
+# 精确缩放匹配失败后，额外尝试的尺度范围（应对非整倍缩放）
+scale_tolerance = 0.06
+
+[logging]
+level = "INFO"
+dir = "logs"
+# 认不出场景 / 找不到模板时自动存调试图（强烈建议开着）
+save_debug_frames = true
+# 定期存一张画面截图（秒）；排查"当时到底什么界面"很有用
+debug_frame_interval = 30.0
+
+# =============================================================================
+# 任务
+# =============================================================================
+[tasks]
+# 按顺序执行；每个 tick 只让一个任务动作，避免抢同一个界面
+active = ["repeat_stage"]
+
+# -----------------------------------------------------------------------------
+# 自动战斗 / 重复刷本（主力功能）
+#
+# 流程：战斗里确保 AUTO 和倍速开着 -> 结算界面点「再次挑战」-> 循环。
+# 游戏内重复次数用完后回到大厅，此时按 enter_sequence 重新进本。
+#
+# 重要：enter_sequence 必须按你自己的关卡位置配置 —— 每个人的冒险图位置、
+#       当前活动都不一样，这个没法预设。用 capture 采集对应按钮的模板填进来。
+# -----------------------------------------------------------------------------
+[tasks.repeat_stage]
+enabled = true
+# 0 = 无限刷
+max_runs = 0
+use_auto_battle = true
+use_fast_speed = true
+# 用游戏内「再次挑战」，减少 UI 往返（推荐 true）
+use_repeat_battle = true
+battle_timeout = 600.0
+after_battle_delay = [1.0, 2.5]
+# 遇到这两种弹窗就停机等人工处理，不要盲目重试
+popup_threshold = 0.88
+after_popup_delay = [0.4, 1.0]
+
+# 进本导航序列：从大厅一路点到「开始战斗」。
+# 下面只是**格式示例**，模板名和步数都要按你的客户端实际情况改。
+#
+# [[tasks.repeat_stage.enter_sequence]]
+# click    = "lobby/btn_adventure"
+# wait_for = "adventure/btn_stage_list"
+# timeout  = 20
+# delay    = [0.8, 1.6]
+#
+# [[tasks.repeat_stage.enter_sequence]]
+# click    = "adventure/btn_stage_list"
+# wait_for = "battle/btn_start_battle"
+#
+# [[tasks.repeat_stage.enter_sequence]]
+# click    = "battle/btn_start_battle"
+
+# -----------------------------------------------------------------------------
+# 秘密商店自动刷新（参考 Epic-Seven-E7-Secret-Shop-Refresh 的做法）
+#
+# 先手动刷到目标出现、确认脚本认得出，再放开无人值守。
+# -----------------------------------------------------------------------------
+[tasks.secret_shop]
+enabled = false
+# 0 = 不限
+max_refreshes = 100
+max_purchases = 0
+# 要买的东西（模板名）。留空 = 只刷新不购买
+buy_names = ["shop/item_covenant_bookmark", "shop/item_mystic_medal"]
+# 商品列表区域（归一化）
+list_region = [0.08, 0.18, 0.84, 0.62]
+refresh_cost_gold = 3
+# 刷新花费上限（0 = 不限）
+gold_budget = 0
+item_threshold = 0.88
+after_refresh_delay = [1.0, 1.8]
+after_purchase_delay = [1.2, 2.2]
+
+# -----------------------------------------------------------------------------
+# 通用序列任务：定时领邮件 / 圣域收菜 / 派遣等，全部配置驱动
+# 可以起多个实例，用 type = "sequence" 指定实现
+# -----------------------------------------------------------------------------
+[tasks.mail]
+type = "sequence"
+enabled = false
+scenes = ["lobby", "popup"]
+interval_minutes = 30
+repeat = 0
+on_finish_stop_all = false
+
+# [[tasks.mail.flow]]
+# click    = "lobby/btn_mail"
+# wait_for = "mail/btn_claim_all"
+#
+# [[tasks.mail.flow]]
+# click    = "mail/btn_claim_all"
+# wait_for = "common/btn_ok"
+
+# -----------------------------------------------------------------------------
+# 装备清理（批量出售）
+# ⚠️ 最需要现场校准的功能，第一次务必 dry-run
+# -----------------------------------------------------------------------------
+[tasks.gear_cleanup]
+type = "gear_cleanup"
+enabled = false
+scenes = ["inventory", "popup"]
+# 单次最多处理多少批，防止一次卖掉全部家当
+max_items = 200
+# 已锁定装备绝不动（需要采集 inventory/icon_locked 模板才生效）
+keep_locked = true
+after_sell_delay = [1.0, 2.0]
+
+# [[tasks.gear_cleanup.flow]]
+# click    = "inventory/btn_filter"
+# wait_for = "inventory/btn_sell"
+
+# =============================================================================
+# 场景识别
+#
+# any  = 命中任一模板即认为处于该场景
+# none = 命中任一模板则否决该场景
+#
+# 判定优先级固定为（从具体到通用）：
+#   loading > popup > battle_result > battle_ready > battle > secret_shop > sanctuary > lobby
+# 例：结算界面底部可能残留战斗 HUD，所以 battle_result 必须先于 battle 判定。
+# =============================================================================
+
+[scenes.lobby]
+any = ["lobby/btn_adventure", "lobby/btn_hero", "lobby/btn_sanctuary"]
+none = []
+
+[scenes.battle]
+any = ["battle/btn_auto_off", "battle/btn_auto_on", "battle/btn_speed_x1", "battle/icon_pause"]
+none = ["battle/btn_retry"]
+
+[scenes.battle_ready]
+any = ["battle/btn_start_battle"]
+none = []
+
+[scenes.battle_result]
+any = ["battle/btn_retry", "battle/btn_confirm_result"]
+none = []
+
+[scenes.popup]
+any = ["common/btn_ok", "common/btn_confirm", "common/btn_close"]
+none = []
+
+[scenes.loading]
+any = ["common/icon_loading"]
+none = []
+
+[scenes.secret_shop]
+any = ["shop/btn_refresh"]
+none = []
+
+[scenes.sanctuary]
+any = ["sanctuary/btn_collect_all"]
+none = []
+
+[scenes.inventory]
+any = ["inventory/btn_sell"]
+none = []

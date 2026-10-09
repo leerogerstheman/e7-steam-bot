@@ -1,0 +1,22 @@
+# 第七史诗 Steam / PC 端自动化脚本 —— 运行依赖
+#
+# Python 3.11+（用到内置 tomllib）。Windows 10/11 64 位。
+
+# 图像识别
+opencv-python>=4.8
+numpy>=1.24
+
+# Windows 窗口 / DPI / 输入
+pywin32>=306
+
+# 截图后端
+#   bettercam  = DXGI Desktop Duplication，首选（DX11 游戏必需）
+#   mss        = GDI BitBlt 兜底
+bettercam>=1.0.0
+mss>=9.0
+
+# 键鼠输入（备用；本项目主路径是自实现的 SendInput 包装，见 e7bot/humaninput.py）
+pydirectinput>=1.0.4
+
+# 模板采集界面用（tkinter 是标准库，Pillow 负责把 numpy 图显示到 Tk）
+pillow>=10.0

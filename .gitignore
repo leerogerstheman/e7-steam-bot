@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 运行产物
+logs/
+*.log
+.pytest_cache/
+
+# 模板：只忽略你自己采的图，保留目录结构与说明
+# （如果你想把模板一起提交，把这行注释掉即可）
+templates/**/*.png
+templates/**/*.json
+!templates/**/README.md
+!templates/**/.gitkeep
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# 本地覆盖配置（放你自己的关卡导航序列，不想提交就用它）
+config/local.toml
