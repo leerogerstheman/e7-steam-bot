@@ -2,6 +2,23 @@
 
 调研日期 2026-10-10。标注：**✅已确认**（有官方/一手来源）／**⚠️推测**／**❌未查证到**
 
+> ## ⚠️ 后续更正（2026-10-10 晚，拿到 Demo 二进制之后）
+>
+> 本文是**在只能靠商店页与社区帖子推断时**写的。之后用户装好了 Demo，
+> 我对 `EpicSeven_Steam.exe` 做了只读二进制分析，**有两条结论被推翻**：
+>
+> | 本文原结论 | 实测结论 |
+> |---|---|
+> | §4「渲染 API：**DirectX 11**」 | ❌ **OpenGL/GLES**（依赖表有 `OPENGL32.dll`/`EGL.dll`/`GLESv2.dll`，且搜 `D3D11`/`dxgi` 零命中） |
+> | §4/§6「**必须管理员权限**」 | ❌ 游戏 exe 清单是 **`asInvoker`**，本身不请求提权（改为"强烈建议"） |
+> | §4「YUNA Engine 原生 C++」 | ⚠️ 更准确：**cocos2d-x + SDL2 + Lua**，Smilegate 包装为 YUNA2D |
+>
+> 另新增确认：**窗口标题 = `EpicSeven (Steam)`**、主程序 = `EpicSeven_Steam.exe`、
+> 反作弊**进程内加载**、游戏**运行时自行设为 DPI 感知**。
+>
+> **请以 [demo-findings.md](demo-findings.md) 为准。** 本文正文保留原样不改，
+> 以维持其出处与时间线（哪些是当时查证到的、哪些是当时的推测）。
+
 ## 1. Steam 版上线信息
 - ✅ **尚未上线，定档 2026-10-29**（Steam 官方 API 返回 `coming_soon: true`）。AppID **5019180**（免费）。Demo AppID **5129800**（Steam Next Fest，10/8–10/27；**试玩进度不继承**）。
 - ✅ **跨平台账号互通**。商店页字段 `ext_user_account_notice`: "STOVE (Supports Linking to Steam Account)"。韩媒：现有账号可直接在 Steam 游玩；新服务器「Foundry (파운드리)」在 **Steam / STOVE / 手机三端互通**。

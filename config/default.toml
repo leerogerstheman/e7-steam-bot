@@ -13,10 +13,31 @@
 # =============================================================================
 
 [window]
-# 按正则匹配窗口标题。Steam 版可能是 "Epic Seven" / "第七史诗" 等
-title_patterns = ["Epic\\s*Seven", "第七史诗", "에픽세븐", "エピックセブン"]
-exe_patterns = ["EpicSeven", "Epic Seven"]
+# 窗口标题正则。第一条是**实测值**：Steam Demo（AppID 5129800）的
+# EpicSeven_Steam.exe 里直接读出的 UTF-16 字符串就是 "EpicSeven (Steam)"。
+# 后面几条用于兼容官方 PC 端 / 其它语言客户端。
+title_patterns = [
+  "EpicSeven\\s*\\(Steam\\)",
+  "EpicSeven",
+  "Epic\\s*Seven",
+  "第七史诗",
+  "에픽세븐",
+  "エピックセブン",
+]
+# 实测主程序名：EpicSeven_Steam.exe
+exe_patterns = ["EpicSeven_Steam", "EpicSeven", "Epic Seven"]
+# 排除不该锁定的窗口。Steam 端启动链路里有 UNCHEATER 的独立加载器
+# ucldr_Epic7_SM_loader_x64.exe，它可能弹自己的窗口（初始化失败/更新提示）。
+# 锁错窗口的话脚本会对着非游戏窗口截图点击，而且很难从日志看出来。
+exclude_title_patterns = ["uncheater", "ucldr", "loader"]
+exclude_exe_patterns = ["ucldr", "uncheater", "xnina", "crashpad"]
 min_size = [800, 450]
+# 仅靠标题匹配时，游戏名至少要占标题多大比例（0~1）才算数。
+# 防的是"游戏名只是长标题里一小段"的假阳性 —— 实测踩到过：`第七史诗`
+# 匹配到了浏览器标签页「第七史诗steam端要上线了… — DeepSeek Harness」，
+# 于是脚本把浏览器当成了游戏窗口（失败现象是"识别不到场景"，极难联想）。
+# 进程名匹配不受这个限制（进程名不像标题那样容易被撞上）。
+min_title_coverage = 0.5
 # 操作前自动把游戏切到前台（SendInput 只作用于前台窗口）
 auto_activate = true
 activate_settle = 0.35

@@ -37,7 +37,6 @@ from e7bot.winutil import (
     GameNotFound,
     client_rect_screen,
     enable_dpi_awareness,
-    find_window,
     monitor_index_of,
 )
 
@@ -83,11 +82,7 @@ def cmd_list(cfg: Config, args: argparse.Namespace) -> int:
 
 def cmd_health(cfg: Config, args: argparse.Namespace) -> int:
     enable_dpi_awareness()
-    win = find_window(
-        title_patterns=cfg.get("window.title_patterns", []),
-        exe_patterns=cfg.get("window.exe_patterns", []),
-        min_size=tuple(cfg.get("window.min_size", (800, 450))),
-    )
+    win = cfg.find_game_window()
     if win is None:
         print("没找到第七史诗窗口。健康检查需要在游戏运行时做（要拿实时画面）。")
         return 4

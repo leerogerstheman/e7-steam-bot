@@ -52,7 +52,6 @@ from .winutil import (
     activate,
     client_rect_screen,
     enable_dpi_awareness,
-    find_window,
     is_foreground,
     window_scale_note,
 )
@@ -271,12 +270,7 @@ class Bot:
                 "建议右键 -> 以管理员身份运行。"
             )
 
-        self.window = find_window(
-            title_patterns=self.cfg.get("window.title_patterns", []),
-            exe_patterns=self.cfg.get("window.exe_patterns", []),
-            min_size=tuple(self.cfg.get("window.min_size", (800, 450))),  # type: ignore[arg-type]
-            picker=picker,
-        )
+        self.window = self.cfg.find_game_window(picker=picker)
         if self.window is None:
             raise GameNotFound(
                 "没有找到第七史诗窗口。请先启动游戏（Steam 版 / Demo），"

@@ -29,7 +29,7 @@
 | 坐标 | 固定分辨率，可硬编码像素 | 分辨率/窗口尺寸可变 | **全链路归一化坐标 (0..1)** + 模板按参考分辨率自动缩放 |
 | 流程 | 按顺序盲点固定坐标 | 分辨率不同、Steam 覆盖层、活动弹窗多 | **先认场景再动作**的状态机，每 tick 只让一个任务动手 |
 | 反作弊 | 模拟器通常无 | **内核级 UNCHEATER** | 纯外部：只读屏幕、只发键鼠；不碰内存/不注入/不 hook |
-| 权限 | 不需要 | **必须管理员**（UIPI） | 启动即检测并明确告警 |
+| 权限 | 不需要 | **建议管理员**（实测 exe 是 `asInvoker`，但 Steam 可能提权） | 启动即检测并明确告警 |
 
 > 顺带纠正一个容易搞混的点：**[PhantomPilots/AutoFarming](https://github.com/PhantomPilots/AutoFarming) 不是第七史诗脚本**，
 > 它是《七大罪：光与暗之交战》(7DS Grand Cross) 的 PC 端农场脚本。它的**架构**（`IFarmer` 基类 +
@@ -59,14 +59,34 @@
 | 计划上线 | **2026-10-29** |
 | Demo | **5129800**（Steam Next Fest，**现在可下载**，进度不继承） |
 | 反作弊 | **UNCHEATER**，内核级（Wellbia 出品，与 XIGNCODE3 同厂）。**不使用 VAC** |
-| 引擎 | Smilegate 自研 **YUNA Engine**（原生 C++ / **DirectX 11**） |
+| 引擎 | **cocos2d-x + SDL2 + Lua**，Smilegate 包装为 YUNA2D；**OpenGL/GLES 渲染**（不是 DirectX） |
 | 账号 | 需要 **STOVE** 第三方账号，支持与 Steam 账号联动；与手机端数据互通 |
 | 输入 | 商店页带 `Mouse Only Option` 分类 —— **纯鼠标即可完成全部操作** |
-| 系统 | Win10 64-bit / GTX 1060 起 / 10GB / DX11；**1920×1080 是事实基准分辨率** |
+| 系统 | Win10 64-bit / GTX 1060 起 / 10GB；**1920×1080 是事实基准分辨率** |
 
-完整调研（含来源 URL 与"未查证到"的标注）见 [docs/steam-client-research.md](docs/steam-client-research.md)。
+完整调研见 [docs/steam-client-research.md](docs/steam-client-research.md)。
 
-> ⚠️ 引擎是**自研 YUNA，不是 Unity/UE**，所以没有现成的游戏自动化插件，
+### ✅ 已对真实 Demo 做过静态实测
+
+Demo 已安装后，我对 `EpicSeven_Steam.exe` 做了只读的二进制分析，
+**其中两条推翻了上面的推断**，配置也已按实测值修正：
+
+| 项 | 实测结论 | 之前（推断） |
+|---|---|---|
+| **窗口标题** | **`EpicSeven (Steam)`** | 只知道大概含 "Epic Seven" |
+| **主程序名** | **`EpicSeven_Steam.exe`** | 猜测 |
+| **渲染 API** | **OpenGL/GLES**（`OPENGL32.dll`/`EGL.dll`/`GLESv2.dll`） | ~~DirectX 11~~ ❌ |
+| **权限** | exe 清单是 **`asInvoker`**，不请求提权 | ~~必须管理员~~ ❌（改为强烈建议） |
+| **DPI** | 运行时自己调 `SetProcessDPIAware` → **DPI 感知** | 未知 |
+| **反作弊加载** | **进程内加载**（主 exe 不 spawn 加载器）；但目录里有独立的 `ucldr_Epic7_SM_loader_x64.exe` | 未知 |
+
+> 渲染 API 的修正**不影响本项目**：DXGI Desktop Duplication 复制的是**显示器输出**，
+> 与游戏用什么 API 渲染无关，OpenGL 一样照抓 —— 这反而印证了 `bettercam` 是正确选择。
+
+完整证据、可复现的验证脚本、以及"哪些只能靠你实跑确定"见
+**[docs/demo-findings.md](docs/demo-findings.md)**。
+
+> ⚠️ 引擎是 cocos2d-x 血统、**不是 Unity/UE**，所以没有现成的游戏自动化插件，
 > Windows UI Automation 也读不到它的 UI —— 只能走「GPU 截图 + 模板匹配 + 合成输入」。
 
 ---
@@ -107,12 +127,19 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-然后**以管理员身份**运行（UIPI 限制，不提权键鼠事件会被静默丢弃）：
+然后**建议以管理员身份**运行：
 
 ```powershell
 # 在「管理员: Windows PowerShell」里
 .\.venv\Scripts\python.exe run.py doctor
 ```
+
+> **关于管理员权限**（实测修正）：`EpicSeven_Steam.exe` 的清单是 `asInvoker`，
+> 游戏本身**不请求**提权，所以理论上不是必须。但仍强烈建议提权，因为
+> ① **Steam 可能以管理员运行**，那样游戏会继承高完整性级别，此时不提权的脚本
+> 发的键鼠事件会被 UIPI **静默丢弃**（"点了没反应"最常见的根因）；
+> ② UNCHEATER 是内核级驱动，安装/加载环节需要提权。
+> 提权本身无副作用：高完整性进程向低完整性窗口发输入不受限制。
 
 ---
 
@@ -345,7 +372,7 @@ enabled = true                 # 记事件流，供 `run.py report` 出报表
 |---|---|
 | 找不到窗口 | `doctor --list-windows` 看真实标题，改 `window.title_patterns`（正则） |
 | 截图全黑 / 抓帧失败 | 显示器休眠了（DXGI 依赖显示器输出，脚本已自动 `SetThreadExecutionState` 保活，但别手动关屏）；或游戏在另一块屏上 → 改 `capture.monitor_index` |
-| 点击没反应 | **没以管理员运行**（UIPI 会静默丢弃事件）；或游戏不在前台 |
+| 点击没反应 | ① **没以管理员运行**且 Steam 是提权的（UIPI 会静默丢弃事件）；② 游戏不在前台；③ 反作弊加载器窗口被误锁 —— 检查 `doctor` 报出的窗口标题是否为 `EpicSeven (Steam)` |
 | 大量锚点分数都 < 0.3 | 分辨率不是 16:9 / 不是 1920×1080 基准；或模板采错界面；或截到了黑屏 |
 | 分数 0.6~0.86 之间 | 典型是模板带了背景、或画面有动态元素。重采，或适度降低该模板阈值 |
 | 场景识别乱跳 | 用通用按钮（`btn_ok` 之类）当了场景锚点，换成该界面**独有**的元素 |
@@ -357,6 +384,8 @@ enabled = true                 # 记事件流，供 `run.py report` 出报表
 | 录制出来的模板 dry-run 找不到 | 录制时画面有动画/过渡。重新录那一段，或用 `run.py capture` 手动重采 |
 | 模板匹配率在下降 | `run.py templates health` 体检；`unused` 找僵尸模板；`dedupe` 找重复 |
 | 想换分辨率 | 不用改任何配置，直接换 —— 模板会按 `ref_size` 自动缩放 |
+| `doctor` 报「忽略了标题 … 游戏名只占标题的 N%」 | 那是**防误锁的保护**在起作用（比如浏览器标签页里含"第七史诗"）。若确实是你的游戏窗口标题，调小 `window.min_title_coverage` |
+| 锁到的窗口不是游戏 | 看 `doctor` 报出的标题与进程名。优先靠 `window.exe_patterns` 匹配（进程名不会被浏览器撞上）；必要时用 `exclude_title_patterns` 排掉 |
 
 调试图、运行日志都在 `logs/` 下。
 
@@ -391,10 +420,21 @@ e7bot/
 │   ├── smoke_hardware.py   硬件冒烟测试（真抓屏 + 真发输入）
 │   ├── build_exe.py        打包 exe
 │   └── selftest.py         离线自检（合成画面）
-├── tests/                  135 项 pytest（conftest 用假窗口/假截图/假输入驱动）
-├── docs/                   SAFETY / OCR / GUI / 调研报告
+├── tests/                  250+ 项 pytest（conftest 用假窗口/假截图/假输入驱动）
+├── docs/                   SAFETY / OCR / GUI / demo-findings / 调研报告
 └── templates/default/      模板库（按 profile 分组）
 ```
+
+### 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/demo-findings.md](docs/demo-findings.md) | **真实 Demo 的静态实测记录**：窗口标题、引擎、反作弊、权限、DPI，含可复现的验证脚本与被推翻的推断 |
+| [docs/SAFETY.md](docs/SAFETY.md) | 安全边界、行为层风险、四层停机与告警保障 |
+| [docs/OCR.md](docs/OCR.md) | 数字识别：怎么采字形、怎么配 region、实测精度与已知限制 |
+| [docs/GUI.md](docs/GUI.md) | 托盘 GUI 与 exe 打包 |
+| [docs/steam-client-research.md](docs/steam-client-research.md) | 早期调研（靠商店页与社区帖推断，已被 demo-findings 部分更正） |
+| [docs/android-scripts-research.md](docs/android-scripts-research.md) | 现有安卓端脚本逐仓库调研 |
 
 ### 三级验证
 

@@ -22,10 +22,30 @@ from .humaninput import Humanizer
 
 DEFAULTS: dict[str, Any] = {
     "window": {
-        # Steam 版窗口标题；韩/中/日/英都列上，用正则匹配
-        "title_patterns": [r"Epic\s*Seven", r"第七史诗", r"에픽세븐", r"エピックセブン"],
-        "exe_patterns": [r"EpicSeven", r"Epic Seven"],
+        # Steam Demo（AppID 5129800）实测的窗口标题是 `EpicSeven (Steam)`
+        # —— 从 EpicSeven_Steam.exe 的 UTF-16 字符串里直接读出来的。
+        # 第一条就是精确匹配，后面的正则用于兼容其它版本/语言的客户端。
+        "title_patterns": [
+            r"EpicSeven\s*\(Steam\)",   # 实测：EpicSeven (Steam)
+            r"EpicSeven",               # 无空格写法
+            r"Epic\s*Seven",            # 有空格写法（官方 PC 端可能是这个）
+            r"第七史诗",
+            r"에픽세븐",
+            r"エピックセブン",
+        ],
+        # 实测主程序名：EpicSeven_Steam.exe
+        "exe_patterns": [r"EpicSeven_Steam", r"EpicSeven", r"Epic Seven"],
+        # 排除掉**不该锁定**的窗口。Steam 端启动链路里有 UNCHEATER 的
+        # 独立加载器 ucldr_Epic7_SM_loader_x64.exe，它可能弹出自己的窗口；
+        # 锁错窗口的话脚本会对着非游戏窗口截图点击，而且很难从日志看出来。
+        "exclude_title_patterns": [r"uncheater", r"ucldr", r"loader"],
+        "exclude_exe_patterns": [r"ucldr", r"uncheater", r"xnina", r"crashpad"],
         "min_size": [800, 450],
+        # 仅靠标题匹配时，游戏名至少要占标题多大比例（0~1）才算数。
+        # 防的是"游戏名只是长标题里一小段"的假阳性 —— 实测踩到过：
+        # `第七史诗` 匹配到了浏览器标签页「第七史诗steam端要上线了…」，
+        # 于是脚本把浏览器当成了游戏窗口。0.5 表示游戏名要覆盖一半以上标题。
+        "min_title_coverage": 0.5,
         "auto_activate": True,
         "activate_settle": 0.35,
         # 游戏窗口不在前台时是否暂停（SendInput 只作用于前台窗口）
@@ -250,6 +270,40 @@ class Config:
 
     # -- 派生对象 ---------------------------------------------------------- #
 
+    def window_titles(self) -> list[str]:
+        return [str(p) for p in (self.get("window.title_patterns", []) or [])]
+
+    def window_exes(self) -> list[str]:
+        return [str(p) for p in (self.get("window.exe_patterns", []) or [])]
+
+    def window_excludes(self) -> list[str]:
+        """标题与进程名的排除模式合并成一个列表。
+
+        `winutil.find_window` 的 exclude 是同时对标题和进程名做匹配的，
+        所以这里合并即可，调用方不用关心匹配的是哪一个。
+        """
+        out: list[str] = []
+        for key in ("window.exclude_title_patterns", "window.exclude_exe_patterns"):
+            out += [str(p) for p in (self.get(key, []) or [])]
+        return out
+
+    def window_min_size(self) -> tuple[int, int]:
+        v = self.get("window.min_size", (800, 450)) or (800, 450)
+        return (int(v[0]), int(v[1]))
+
+    def find_game_window(self, picker=None):
+        """按配置找游戏窗口。所有工具/引擎都走这里，保证行为一致。"""
+        from .winutil import find_window
+
+        return find_window(
+            title_patterns=self.window_titles(),
+            exe_patterns=self.window_exes(),
+            exclude_patterns=self.window_excludes(),
+            min_size=self.window_min_size(),
+            min_title_coverage=float(self.get("window.min_title_coverage", 0.5)),
+            picker=picker,
+        )
+
     def humanizer(self) -> Humanizer:
         s = self.section("input")
         return Humanizer(
@@ -309,6 +363,20 @@ class Config:
 
         if not self.get("window.title_patterns") and not self.get("window.exe_patterns"):
             problems.append("window.title_patterns 与 exe_patterns 不能同时为空")
+
+        # 标题模式和排除模式不能互相打架 —— 否则永远找不到窗口，
+        # 而且报错信息只会说"没找到"，很难定位到是配置自相矛盾。
+        import re as _re
+
+        for tp in self.get("window.title_patterns", []) or []:
+            for xp in self.get("window.exclude_title_patterns", []) or []:
+                try:
+                    if _re.search(tp, xp, _re.IGNORECASE) or _re.search(xp, tp, _re.IGNORECASE):
+                        problems.append(
+                            f"window 配置自相矛盾: 标题模式 {tp!r} 与排除模式 {xp!r} 会互相匹配"
+                        )
+                except _re.error:
+                    problems.append(f"window 里的正则非法: {tp!r} / {xp!r}")
 
         speed = self.get("input.speed", 1.0)
         if not (0.1 <= float(speed) <= 20):

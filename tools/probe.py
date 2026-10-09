@@ -22,7 +22,6 @@ from e7bot.vision import Matcher, TemplateLibrary, annotate
 from e7bot.winutil import (
     client_rect_screen,
     enable_dpi_awareness,
-    find_window,
     monitor_index_of,
     window_scale_note,
 )
@@ -32,11 +31,7 @@ def run_probe(cfg: Config, duration: float = 30.0, interval: float = 0.5,
               save_frames: bool = False) -> int:
     enable_dpi_awareness()
 
-    win = find_window(
-        title_patterns=cfg.get("window.title_patterns", []),
-        exe_patterns=cfg.get("window.exe_patterns", []),
-        min_size=tuple(cfg.get("window.min_size", (800, 450))),
-    )
+    win = cfg.find_game_window()
     if win is None:
         print("没找到第七史诗窗口。先启动游戏（Steam 版 / Demo）。")
         return 1

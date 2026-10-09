@@ -258,33 +258,92 @@ def list_windows() -> list[WindowInfo]:
     return out
 
 
+def _title_coverage(title: str, patterns: list) -> float:
+    """标题正则匹配**覆盖了标题的多大比例**（0~1）。
+
+    为什么需要这个而不是简单的 `re.search`：
+
+    实测踩到过 —— `第七史诗` 这个模式匹配到了**浏览器标签页**，
+    标题是「第七史诗steam端要上线了… — DeepSeek Harness」，于是脚本把浏览器
+    当成了游戏窗口。这类"游戏名只是长标题里的一小段"的假阳性很危险：
+    脚本会对着一个完全无关的窗口截图和点击，而失败现象是"识别不到场景"，
+    根本联想不到是锁错了窗口。
+
+    覆盖比例能干净地区分两种情况：
+      * 窗口标题**就是**游戏名（如 `EpicSeven (Steam)`）-> 接近 1.0
+      * 游戏名只是长标题里的一小段 -> 很低（4/38 ≈ 0.1）
+
+    代价是"第七史诗 - Smilegate"这种带后缀的标题覆盖比例只有 ~0.3，
+    会被拒绝。这是**刻意选择安全侧**：宁可找不到（有明确报错 + `--list-windows`
+    可排查），也不要锁错窗口乱点。
+    """
+    best = 0.0
+    for r in patterns:
+        m = r.search(title)
+        if m:
+            best = max(best, (m.end() - m.start()) / max(len(title), 1))
+    return best
+
+
 def find_window(
     title_patterns: Iterable[str] = (),
     exe_patterns: Iterable[str] = (),
+    exclude_patterns: Iterable[str] = (),
     min_size: tuple[int, int] = (640, 360),
+    min_title_coverage: float = 0.5,
     picker: Optional[Callable[[list[WindowInfo]], Optional[WindowInfo]]] = None,
 ) -> Optional[WindowInfo]:
     """按窗口标题 / 进程名找游戏窗口。
 
-    找不到唯一匹配时调用 picker 让用户手选（GUI 里用得到）。
+    匹配分两级，**进程名优先**：
+
+    1. **进程名命中**（最强信号）—— 实测已知 Steam 端主程序是
+       `EpicSeven_Steam.exe`，进程名不会像窗口标题那样被浏览器/编辑器撞上。
+    2. **标题命中且覆盖比例 >= `min_title_coverage`** —— 仅在没有任何进程名
+       命中时才考虑，用于兼容进程名未知的其它客户端版本。
+
+    两级都命不中时返回 None（而不是勉强挑一个），让上层给出明确报错。
+
+    `exclude_patterns` 用来排掉**不该锁定的窗口**：Steam 端启动链路里有
+    UNCHEATER 的独立加载器 `ucldr_Epic7_SM_loader_x64.exe`，它可能弹自己的窗口。
     """
     import re
 
     title_res = [re.compile(p, re.IGNORECASE) for p in title_patterns if p]
     exe_res = [re.compile(p, re.IGNORECASE) for p in exe_patterns if p]
+    exclude_res = [re.compile(p, re.IGNORECASE) for p in exclude_patterns if p]
 
-    candidates: list[WindowInfo] = []
+    strong: list[WindowInfo] = []
+    weak: list[tuple[float, WindowInfo]] = []
+    rejected_titles: list[tuple[float, str]] = []
+
     for w in list_windows():
         if w.client.width < min_size[0] or w.client.height < min_size[1]:
             continue
-        hit = False
-        if title_res and any(r.search(w.title) for r in title_res):
-            hit = True
-        if exe_res and any(r.search(w.exe) for r in exe_res):
-            hit = True
-        if hit:
-            candidates.append(w)
+        if exclude_res and any(r.search(w.title) or r.search(w.exe) for r in exclude_res):
+            continue
 
+        if exe_res and any(r.search(w.exe) for r in exe_res):
+            strong.append(w)
+            continue
+
+        if title_res:
+            cov = _title_coverage(w.title, title_res)
+            if cov >= min_title_coverage:
+                weak.append((cov, w))
+            elif cov > 0.0:
+                rejected_titles.append((cov, w.title))
+
+    if rejected_titles and not strong and not weak:
+        # 有"像但不是"的窗口时把原因说清楚，否则用户只会看到"没找到游戏窗口"
+        for cov, title in rejected_titles[:5]:
+            print(
+                f"[find_window] 忽略了标题 {title!r}："
+                f"游戏名只占标题的 {cov:.0%}（阈值 {min_title_coverage:.0%}），"
+                f"不像游戏窗口。若是误判，请调小 window.min_title_coverage 或改用进程名匹配。"
+            )
+
+    candidates = strong if strong else [w for _cov, w in sorted(weak, key=lambda t: -t[0])]
     if not candidates:
         return None
 

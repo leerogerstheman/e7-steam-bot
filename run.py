@@ -88,7 +88,7 @@ def load_config(path: str | None) -> Config:
 def cmd_doctor(args) -> int:
     from e7bot.capture import ScreenGrabber
     from e7bot.engine import is_admin
-    from e7bot.winutil import dpi_mode, find_window, list_monitors, monitor_index_of
+    from e7bot.winutil import dpi_mode, list_monitors, monitor_index_of
 
     cfg = load_config(args.config)
     ok = True
@@ -127,11 +127,7 @@ def cmd_doctor(args) -> int:
 
     # 5) 窗口
     print("-" * 72)
-    win = find_window(
-        title_patterns=cfg.get("window.title_patterns", []),
-        exe_patterns=cfg.get("window.exe_patterns", []),
-        min_size=tuple(cfg.get("window.min_size", (800, 450))),
-    )
+    win = cfg.find_game_window()
     if win is None:
         print("[!! ] 没找到第七史诗窗口。请先启动游戏（Steam 版 / Demo）。")
         print("     可用 `python run.py doctor --list-windows` 看当前所有窗口标题。")

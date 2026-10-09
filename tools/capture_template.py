@@ -37,7 +37,6 @@ from e7bot.winutil import (
     Rect,
     client_rect_screen,
     enable_dpi_awareness,
-    find_window,
     window_scale_note,
 )
 
@@ -168,11 +167,7 @@ class CaptureApp:
         self.lib = TemplateLibrary(self.root_dir, self.profile)
         self.matcher = Matcher(self.lib)
 
-        self.window = find_window(
-            title_patterns=cfg.get("window.title_patterns", []),
-            exe_patterns=cfg.get("window.exe_patterns", []),
-            min_size=tuple(cfg.get("window.min_size", (800, 450))),
-        )
+        self.window = cfg.find_game_window()
         if self.window is None:
             raise GameNotFound(
                 "没找到第七史诗窗口，请先启动游戏（Steam 版或 Demo 均可）。"

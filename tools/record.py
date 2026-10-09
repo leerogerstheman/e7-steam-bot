@@ -51,7 +51,6 @@ from e7bot.winutil import (
     Rect,
     client_rect_screen,
     enable_dpi_awareness,
-    find_window,
     monitor_index_of,
 )
 
@@ -259,11 +258,7 @@ def record(
 ) -> RecordSession:
     enable_dpi_awareness()
 
-    win = find_window(
-        title_patterns=cfg.get("window.title_patterns", []),
-        exe_patterns=cfg.get("window.exe_patterns", []),
-        min_size=tuple(cfg.get("window.min_size", (800, 450))),
-    )
+    win = cfg.find_game_window()
     if win is None:
         raise GameNotFound(
             "没找到第七史诗窗口，请先启动游戏（Steam 版或 Demo 均可）。"
