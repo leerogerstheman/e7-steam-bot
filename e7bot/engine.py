@@ -265,9 +265,10 @@ class Bot:
 
         if not is_admin():
             log.warning(
-                "当前不是管理员权限。官方 PC 端通常以管理员运行，"
-                "受 UIPI 限制，非管理员进程发送的键鼠事件会被静默丢弃。"
-                "建议右键 -> 以管理员身份运行。"
+                "当前不是管理员权限。实测游戏 exe 是 asInvoker（本身不请求提权），"
+                "所以理论上不是必须；但若 Steam 以管理员运行，游戏会继承高完整性级别，"
+                "受 UIPI 限制，本进程发送的键鼠事件会被静默丢弃。"
+                "建议以管理员身份运行（无副作用）。"
             )
 
         self.window = self.cfg.find_game_window(picker=picker)

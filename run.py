@@ -101,9 +101,12 @@ def cmd_doctor(args) -> int:
     admin = is_admin()
     print(f"[{'OK ' if admin else '!! '}] 管理员权限: {admin}")
     if not admin:
-        ok = False
-        print("     官方 PC 端通常以管理员运行；受 UIPI 限制，不提权键鼠事件会被丢弃。")
-        print("     请右键 -> 以管理员身份运行，或从管理员终端启动。")
+        print("     实测：EpicSeven_Steam.exe 的清单是 asInvoker，游戏本身**不请求**提权，")
+        print("     所以理论上不是必须。但仍强烈建议提权，因为：")
+        print("       * Steam 可能以管理员运行 -> 游戏继承高完整性级别 -> 不提权的脚本")
+        print("         发的键鼠事件会被 UIPI 静默丢弃（'点了没反应'最常见的根因）")
+        print("       * UNCHEATER 是内核级驱动，其安装/加载环节需要提权")
+        print("     提权无副作用：高完整性进程向低完整性窗口发输入不受限制。")
 
     # 2) DPI
     enable_dpi_awareness()
@@ -124,6 +127,24 @@ def cmd_doctor(args) -> int:
     print("-" * 72)
     for i, rect in list_monitors():
         print(f"[i  ] 显示器 {i}: {rect.width}x{rect.height} @ ({rect.left},{rect.top})")
+
+    # 4.5) 游戏安装（Steam 库）
+    print("-" * 72)
+    from e7bot.steamlib import APPID_DEMO, APPID_FULL, find_all
+
+    installs = find_all()
+    if not installs:
+        print(f"[i  ] 未在 Steam 库里找到 Epic Seven（AppID {APPID_FULL} 正式版 / {APPID_DEMO} Demo）")
+        print("     装了但没找到？用 `run.py doctor --game-dir <路径>` 手动指定。")
+    else:
+        for inst in installs:
+            print("[OK ] 找到游戏安装:")
+            for line in inst.describe().splitlines():
+                print(f"     {line}")
+            if not inst.fully_installed:
+                print("     !! 状态不是「已完整安装」，可能还在下载/更新")
+            if inst.main_exe is None:
+                print("     !! 没找到主程序，安装可能不完整")
 
     # 5) 窗口
     print("-" * 72)

@@ -1,28 +1,16 @@
-﻿按真实 Demo 实测修正配置，并修复一个实测抓到的窗口误锁 bug
+﻿新增 Steam 库定位；按实测修正管理员权限措辞
 
-对已安装的 Steam Demo（AppID 5129800）做只读二进制分析，实测结论：
-- 窗口标题 = "EpicSeven (Steam)"（exe 内 UTF-16 字符串）
-- 主程序 = EpicSeven_Steam.exe
-- 渲染 API = OpenGL/GLES（OPENGL32/EGL/GLESv2），不是 DirectX  ← 推翻旧推断
-- 引擎 = cocos2d-x + SDL2 + Lua（SmokeGate 包装为 YUNA2D）
-- 权限 = asInvoker，游戏本身不请求提权                      ← 推翻旧推断
-- DPI = 运行时自行调用 SetProcessDPIAware，是 DPI 感知
-- 反作弊 = UNCHEATER 进程内加载；目录内有独立加载器 ucldr_Epic7_SM_loader_x64.exe
+- e7bot/steamlib.py：自动从 Steam 库定位游戏安装（正式版 5019180 / Demo 5129800），
+  报告安装目录、主程序名、占用空间、是否完整安装、是否带 UNCHEATER 文件。
+  用正则解析 libraryfolders.vdf，不引入第三方 vdf 解析库（Valve 格式偶变，
+  宽松正则更耐操）。只读，不修改任何东西。
+- run.py doctor：新增「游戏安装」检查段，直接告诉用户装在哪、主程序叫什么。
+  对真实安装实测通过：F:\SteamLibrary\...\Epic Seven Demo，主程序
+  EpicSeven_Steam.exe，检测到 UNCHEATER 文件。
 
-配置修正（config/default.toml + e7bot/config.py）：
-- title_patterns 加入实测精确值；exe_patterns 加入 EpicSeven_Steam
-- 新增 exclude_title_patterns / exclude_exe_patterns，排掉反作弊加载器与崩溃处理器
-- 新增 min_title_coverage，防"游戏名只是长标题里一小段"的假阳性
+- 管理员权限措辞修正（run.py doctor 与 engine.py 启动告警）：
+  实测 exe 清单是 asInvoker，游戏本身不请求提权 -> 从"必须"改为"强烈建议"，
+  并说明真正的原因是 Steam 可能提权 + UNCHEATER 驱动需要提权。
 
-实测抓到的真 bug（跑 doctor 时锁到了浏览器窗口）：
-  标题 `第七史诗steam端要上线了… — DeepSeek Harness` 被 `第七史诗` 模式命中，
-  脚本把浏览器当成游戏窗口 —— 失败现象却是"识别不到场景"，极难定位。
-修法：匹配改两级 —— 进程名优先；仅标题命中时要求游戏名覆盖标题 >=50%，
-并在拒绝时打印原因。有回归测试用真实浏览器标题锁住该行为。
-
-新增：
-- docs/demo-findings.md  实测记录 + 可复现验证脚本 + 被推翻的推断
-- tests/test_window.py   25 项窗口定位测试（含真实标题/加载器/浏览器假阳性）
-
-修正文档：README 与 docs/steam-client-research.md（后者加更正抬头，正文保留原样）
-测试：259 项 pytest + 74 项自检断言，pyflakes 全树干净
+测试：278 项 pytest（新增 tests/test_steamlib.py 19 项），74 项自检断言，
+pyflakes 全树干净。

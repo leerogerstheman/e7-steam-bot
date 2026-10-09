@@ -148,7 +148,8 @@ python -m venv .venv
 **不要直接 `run`。** 按下面五步走，每步都有明确目的：
 
 ```powershell
-# ① 环境自检：管理员权限 / DPI / 截图后端实测 / 窗口 / 显示器 / 模板齐备度
+# ① 环境自检：管理员权限 / DPI / **Steam 库里的游戏安装** / 截图后端实测 /
+#    窗口 / 显示器 / 模板齐备度
 python run.py doctor
 python run.py doctor --list-windows     # 找不到窗口时，列出所有窗口标题
 
@@ -399,7 +400,8 @@ e7bot/
 │                           alert-test/report/run/gui/selftest）
 ├── config/default.toml     全注释配置
 ├── e7bot/
-│   ├── winutil.py          窗口定位、客户区矩形、DPI 感知、多显示器
+│   ├── winutil.py          窗口定位、客户区矩形、DPI 感知、多显示器、标题覆盖率防误锁
+│   ├── steamlib.py         Steam 库定位：找游戏装在哪、主程序叫什么、是否带反作弊
 │   ├── capture.py          截图后端（bettercam/mss/printwindow）+ 黑屏/失败自动降级
 │   ├── humaninput.py       SendInput 封装：贝塞尔鼠标轨迹、随机化、扫描码键盘
 │   ├── vision.py           分辨率无关模板匹配、多尺度、±1px 补偿、NMS、灰度判断
