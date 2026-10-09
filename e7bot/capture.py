@@ -265,6 +265,16 @@ class ScreenGrabber:
             except Exception as exc:  # noqa: BLE001
                 last = exc
                 time.sleep(0.05)
+
+        # 重试也没救回来。后端**初始化**成功不代表**抓帧**一定能成
+        # （驱动重置、独占全屏切换、显示器热插拔都会让它突然失灵），
+        # 所以这里再给一次换后端的机会，而不是直接判死刑。
+        if self._degrade():
+            try:
+                return self._backend.grab(rect)
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+
         raise CaptureError(f"抓帧失败: {last}")
 
     def _degrade(self) -> bool:

@@ -424,6 +424,11 @@ timeout = 25
     c.check(cfg3.get("scenes.lobby.any") == cfg.get("scenes.lobby.any"), "TOML 往返嵌套数组一致")
     c.check(cfg3.get("tasks.repeat_stage.enter_sequence", []) ==
             cfg.get("tasks.repeat_stage.enter_sequence", []), "TOML 往返序列一致")
+    # TOML 规范里没有 null 类型，值为 None 的键在序列化时被跳过；
+    # 读回来会回退到 DEFAULTS（同样是 None），语义保持一致。
+    c.check(cfg.get("tasks.secret_shop.gold_region") is None, "None 默认值正确")
+    c.check(cfg3.get("tasks.secret_shop.gold_region") is None, "None 值往返后仍为 None")
+    c.check("gold_region" not in dumped, "None 键不应被写进 TOML（TOML 没有 null）")
 
 
 def _test_sequence(c: Checker) -> None:

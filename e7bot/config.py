@@ -51,8 +51,35 @@ DEFAULTS: dict[str, Any] = {
         "pause_key": "f9",          # 暂停/继续
         "max_runtime_minutes": 480,
         "unknown_scene_timeout": 90.0,   # 连续多久认不出场景就停
+        "frozen_timeout": 180.0,         # 画面完全静止多久判定卡死
         "max_consecutive_errors": 8,
         "dry_run": False,           # True = 只识别不点击，用来验证模板
+    },
+    "stats": {
+        "enabled": True,
+        "keep_days": 90,
+    },
+    "alerts": {
+        "enabled": True,
+        "min_interval_seconds": 60,
+        "include_screenshot": True,
+        "sound": {"enabled": True, "repeat": 3},
+        "messagebox": {"enabled": False},
+        "ntfy": {
+            "enabled": False,
+            "server": "https://ntfy.sh",
+            "topic": "",
+            "token": "",
+            "priority": "high",
+        },
+        "webhook": {"enabled": False, "url": ""},
+    },
+    "ocr": {
+        "enabled": False,
+        "backend": "digits",
+        "digits_prefix": "ocr/digits",
+        "threshold": 0.80,
+        "scale_tolerance": 0.06,
     },
     "templates": {
         "root": "templates",
@@ -88,12 +115,52 @@ DEFAULTS: dict[str, Any] = {
             "max_refreshes": 100,
             "buy_names": [],           # 留空 = 只刷新不购买
             "refresh_cost_gold": 3,
+            "gold_budget": 0,          # 按"刷新次数 × 单次花费"估算的上限
+            "gold_region": None,       # 画面上金币数字所在的归一化区域
+            "min_gold": 0,             # 金币低于此值就停（需先启用 OCR）
         },
         "gear_cleanup": {
             "enabled": False,
             "max_items": 200,
             "sell_rarity_below": 0,    # 0 = 关闭按稀有度过滤
             "keep_locked": True,
+        },
+        "arena": {
+            "enabled": False,
+            "interval_minutes": 0,
+            "max_runs": 0,
+            "entry_flow": [],
+            "step_flow": [],
+            "exit_flow": [],
+            "popup_threshold": 0.88,
+            "step_timeout": 45.0,
+        },
+        "sanctuary": {
+            "enabled": False,
+            "interval_minutes": 0,
+            "entry_flow": [],
+            "exit_flow": [],
+            "summon_creature": False,
+        },
+        "dispatch": {
+            "enabled": False,
+            "interval_minutes": 0,
+            "max_runs": 0,
+            "entry_flow": [],
+            "exit_flow": [],
+        },
+        "summon": {
+            "enabled": False,
+            "interval_minutes": 60,
+            "once_per_day": True,
+            "entry_flow": [],
+            "exit_flow": [],
+        },
+        "daily": {
+            "enabled": False,
+            "interval_minutes": 60,
+            "once_per_day": True,
+            "routines": [],
         },
     },
     "scenes": {
@@ -286,8 +353,14 @@ def _fmt_value(v: Any) -> str:
 
 
 def dump_toml(data: dict[str, Any], prefix: str = "") -> str:
+    """把配置字典写成 TOML。
+
+    **值为 None 的键会被跳过** —— TOML 根本没有 null 类型（这是规范决定的，
+    不是实现偷懒）。跳过是安全的：读回来时该键缺失，`Config.get` 会回退到
+    DEFAULTS 里的默认值，而默认值同样是 None，语义完全一致。
+    """
     lines: list[str] = []
-    scalars = {k: v for k, v in data.items() if not isinstance(v, dict)}
+    scalars = {k: v for k, v in data.items() if not isinstance(v, dict) and v is not None}
     tables = {k: v for k, v in data.items() if isinstance(v, dict)}
 
     for k, v in scalars.items():

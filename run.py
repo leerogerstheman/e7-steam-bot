@@ -4,12 +4,17 @@
     python run.py doctor                    环境自检（管理员/DPI/窗口/截图后端/模板）
     python run.py smoke                     硬件冒烟测试（真抓屏 + 真发输入，只移动鼠标）
     python run.py capture                   交互式模板采集（对着游戏框选）
+    python run.py record                    录制回放：手动操作一遍自动生成进本序列
     python run.py probe                     实时场景探针（看脚本"眼里的世界"）
+    python run.py templates list|health|unused|dedupe|threshold|rename
+    python run.py alert-test                测试告警渠道能否真的送到
+    python run.py report                    运行统计报表
     python run.py run --dry-run             只识别不点击，验证模板
     python run.py run                       正式运行
+    python run.py gui                       系统托盘 GUI
     python run.py selftest                  离线自检（合成图像，不需要游戏）
 
-一定要先 `doctor` -> `capture` -> `probe` -> `run --dry-run` -> `run`。
+一定要先 `doctor` -> `capture`/`record` -> `probe` -> `run --dry-run` -> `run`。
 直接 `run` 是最容易出事的用法。
 """
 
@@ -207,8 +212,50 @@ def cmd_doctor(args) -> int:
     else:
         print("[OK ] 配置校验通过")
 
+    # 9) 扩展子系统
+    print("-" * 72)
+
+    from e7bot.alerts import AlertManager
+
+    mgr = AlertManager(cfg, cfg.log_dir())
+    channels = mgr.active_channels()
+    print(f"[OK ] 告警渠道: {', '.join(channels) if channels else '（无）'}")
+    if not cfg.get("alerts.enabled", True):
+        print("     告警总开关是关的（alerts.enabled = false）")
+    elif channels == ["log"]:
+        print("     只有日志渠道 —— 无人值守时你收不到通知。")
+        print("     建议开 [alerts.sound]，或在 [alerts.ntfy] 填 topic 用手机收推送。")
+        print("     配好后用 `python run.py alert-test` 验证。")
+
+    try:
+        stats_dir = cfg.log_dir() / "stats"
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        probe = stats_dir / ".write_test"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        print(f"[OK ] 统计目录可写: {stats_dir}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!! ] 统计目录不可写: {exc}")
+
+    if cfg.get("ocr.enabled", False):
+        try:
+            from e7bot.ocr import DigitReader
+
+            reader = DigitReader(Matcher(lib), prefix=str(cfg.get("ocr.digits_prefix", "ocr/digits")))
+            if reader.is_available():
+                print("[OK ] OCR 数字字形齐备")
+            else:
+                print(f"[!! ] OCR 已启用但缺字形: {', '.join(reader.missing_glyphs()[:12])}")
+                print("     用 `python run.py capture` 采 ocr/digits/0.png ~ 9.png")
+                ok = False
+        except ImportError:
+            print("[!! ] OCR 已启用但 e7bot/ocr.py 不可用")
+            ok = False
+    else:
+        print("[i  ] OCR 未启用（[ocr] enabled = false）")
+
     print("=" * 72)
-    print("自检结果:", "通过，可以 `python run.py capture` 了" if ok else "存在问题，见上方 !! 项")
+    print("自检结果:", "通过，可以 `python run.py capture` 或 `record` 了" if ok else "存在问题，见上方 !! 项")
     return 0 if ok else 1
 
 
@@ -290,6 +337,130 @@ def cmd_smoke(args) -> int:
     return smoke_main()
 
 
+def cmd_record(args) -> int:
+    cfg = load_config(args.config)
+    from tools.record import run_record
+
+    return run_record(
+        cfg,
+        hotkey=args.hotkey,
+        duration=args.duration,
+        threshold=args.threshold,
+        prefix=args.prefix,
+        out_config=args.out,
+        start_immediately=args.no_wait,
+    )
+
+
+def cmd_templates(args) -> int:
+    cfg = load_config(args.config)
+    from tools.template_admin import run_templates
+
+    return run_templates(cfg, args.rest)
+
+
+def cmd_report(args) -> int:
+    from e7bot import stats as S
+
+    cfg = load_config(args.config)
+    path = S.default_path(cfg.log_dir())
+
+    if args.prune:
+        removed = S.prune_old_events(path, float(cfg.get("stats.keep_days", 90)))
+        print(f"已清理 {removed} 条超过 {cfg.get('stats.keep_days', 90)} 天的事件")
+        return 0
+
+    events = S.read_events(path)
+    if not events:
+        print(f"没有事件记录: {path}")
+        print("先跑一次 `python run.py run`（或 `run --dry-run`）就会有数据了。")
+        return 1
+
+    events = S.filter_since(events, args.days)
+
+    if args.sessions:
+        rows = S.recent_sessions(events, limit=args.limit)
+        if not rows:
+            print("没有完整的运行记录（可能进程被强杀，只留下了 run_start）")
+            return 0
+        print(f"{'开始时间':<20}{'时长':<12}结束原因")
+        print("-" * 70)
+        for started, dur, reason in rows:
+            m, sec = divmod(int(dur), 60)
+            h, m = divmod(m, 60)
+            dur_s = f"{h}h{m:02d}m" if h else f"{m}m{sec:02d}s"
+            print(f"{started:<20}{dur_s:<12}{reason or '-'}")
+        return 0
+
+    md = S.build_markdown(events, title=args.title or "e7bot 运行报表")
+    print(md)
+
+    if args.out:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(md, encoding="utf-8")
+        print(f"\n报表已写入: {out}")
+    if args.csv:
+        n = S.write_csv(events, Path(args.csv))
+        print(f"CSV 已写入: {args.csv}（{n} 行）")
+
+    print(S.cleanup_hint(float(cfg.get("stats.keep_days", 90))))
+    return 0
+
+
+def cmd_alert_test(args) -> int:
+    from e7bot.alerts import AlertManager
+
+    cfg = load_config(args.config)
+    mgr = AlertManager(cfg, cfg.log_dir())
+
+    print("=" * 70)
+    print("告警渠道测试")
+    print("=" * 70)
+    channels = mgr.active_channels()
+    print(f"启用的渠道: {', '.join(channels) if channels else '（无）'}")
+    print()
+
+    inactive = [n.name for n in mgr.notifiers if not n.available()]
+    if inactive:
+        print(f"未启用/不可用的渠道: {', '.join(inactive)}")
+        print("（ntfy 需要填 topic；webhook 需要填 url；messagebox 默认关闭）")
+        print()
+
+    print("正在发送测试告警 …")
+    results = mgr.test()
+    ok = 0
+    for name, success in results.items():
+        print(f"  [{'OK ' if success else '!! '}] {name}")
+        ok += success
+
+    print()
+    if ok:
+        print(f"{ok}/{len(results)} 个渠道发送成功。")
+        print("如果你没收到 ntfy 推送，检查 topic 名是否正确、手机是否订阅了同一个 topic。")
+    else:
+        print("没有任何渠道发送成功。请检查 config 的 [alerts] 段。")
+    return 0 if ok else 1
+
+
+def cmd_gui(args) -> int:
+    try:
+        from e7bot.gui import main as gui_main
+    except ImportError as exc:
+        print(f"托盘 GUI 不可用: {exc}")
+        print("安装依赖: .\\.venv\\Scripts\\python.exe -m pip install -r requirements-gui.txt")
+        return 1
+
+    argv: list[str] = []
+    if args.config:
+        argv += ["--config", args.config]
+    if args.dry_run:
+        argv += ["--dry-run"]
+    if args.tasks:
+        argv += ["--tasks", args.tasks]
+    return int(gui_main(argv))
+
+
 # --------------------------------------------------------------------------- #
 # 参数
 # --------------------------------------------------------------------------- #
@@ -340,6 +511,58 @@ def build_parser() -> argparse.ArgumentParser:
     sm = sub.add_parser("smoke", help="硬件冒烟测试（真抓屏 + 真发输入，只移动鼠标不点击）")
     common(sm)
     sm.set_defaults(func=cmd_smoke)
+
+    rc = sub.add_parser("record", help="录制回放：手动操作一遍，自动生成进本序列和模板")
+    common(rc)
+    rc.add_argument("--hotkey", default="f8", help="开始/结束录制的热键（默认 f8）")
+    rc.add_argument("--duration", type=float, default=0.0, help="录制多少秒后自动结束（0=手动）")
+    rc.add_argument("--threshold", type=float, default=0.86, help="判定唯一匹配的阈值")
+    rc.add_argument("--prefix", default="seq", help="模板名前缀（默认 seq）")
+    rc.add_argument("--out", help="生成的配置输出路径")
+    rc.add_argument("--no-wait", action="store_true", help="不等待热键，立即开始录制")
+    rc.set_defaults(func=cmd_record)
+
+    tp = sub.add_parser(
+        "templates",
+        help="模板批量管理（list/health/unused/dedupe/threshold/rename）",
+        epilog=(
+            "示例:\n"
+            "  python run.py templates list\n"
+            "  python run.py templates health --save\n"
+            "  python run.py templates unused\n"
+            "  python run.py templates dedupe --similarity 0.97\n"
+            "  python run.py templates threshold \"battle/*\" 0.82\n"
+            "  python run.py templates rename battle/btn_retry battle/btn_retry_stage\n"
+            "\n"
+            "注意: --config / --verbose 必须写在子命令**之前**\n"
+            "      （正确: templates --config x.toml health）\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    common(tp)
+    tp.add_argument("rest", nargs=argparse.REMAINDER, help="子命令，如 health --save")
+    tp.set_defaults(func=cmd_templates)
+
+    rp = sub.add_parser("report", help="运行统计报表")
+    common(rp)
+    rp.add_argument("--days", type=float, help="只看最近 N 天")
+    rp.add_argument("--out", help="把 Markdown 报表写到文件")
+    rp.add_argument("--csv", help="同时导出 CSV")
+    rp.add_argument("--sessions", action="store_true", help="只看最近几次运行")
+    rp.add_argument("--limit", type=int, default=10, help="--sessions 显示条数")
+    rp.add_argument("--title", help="报表标题")
+    rp.add_argument("--prune", action="store_true", help="清理过期事件")
+    rp.set_defaults(func=cmd_report)
+
+    at = sub.add_parser("alert-test", help="测试告警渠道能否真的送到")
+    common(at)
+    at.set_defaults(func=cmd_alert_test)
+
+    gu = sub.add_parser("gui", help="启动系统托盘 GUI")
+    common(gu)
+    gu.add_argument("--dry-run", action="store_true")
+    gu.add_argument("--tasks", help="覆盖 tasks.active，逗号分隔")
+    gu.set_defaults(func=cmd_gui)
 
     return p
 

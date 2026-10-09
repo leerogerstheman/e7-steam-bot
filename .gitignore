@@ -28,3 +28,15 @@ desktop.ini
 
 # 本地覆盖配置（放你自己的关卡导航序列，不想提交就用它）
 config/local.toml
+
+# 录制工具生成的进本序列（每人关卡不同，不该进仓库）
+config/recorded_sequence.toml
+
+# 打包产物
+build/
+dist/
+*.spec.bak
+
+# 临时文件（调试用，别提交）
+_tmp_*
+~$*

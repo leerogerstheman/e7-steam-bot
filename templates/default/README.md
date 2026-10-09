@@ -61,11 +61,65 @@ python run.py capture
 | `common/btn_cancel` | 关弹窗 |
 | `common/popup_no_stamina` | 体力不足 —— 采了它脚本会**主动停机**而不是空转 |
 | `common/popup_inventory_full` | 背包已满 —— 同上 |
+| `common/popup_insufficient_resource` | 资源不足 —— 同上 |
 | `shop/btn_buy` / `shop/btn_buy_confirm` | 秘密商店购买 |
 | `shop/btn_refresh_confirm` | 刷新确认弹窗 |
 | `shop/item_covenant_bookmark` | 誓约书签（要买的目标） |
 | `shop/item_mystic_medal` | 神秘书签（要买的目标） |
 | `inventory/icon_locked` | 锁定图标 —— 采了它装备清理才有防误卖闸门 |
+| `inventory/btn_sell` / `inventory/btn_sell_confirm` | 装备出售 |
+
+### 竞技场 `arena`（`tasks.arena`）
+
+| 模板名 | 用途 |
+|---|---|
+| `arena/no_opponent` | **退出条件**：没有对手/没有旗子了 |
+| `arena/btn_fight` | 挑战对手 |
+| `arena/btn_autoplay` / `arena/btn_skip` | 战斗内开自动 / 跳过动画 |
+| `arena/btn_result_confirm` | 结算确认 |
+| `arena/btn_claim_reward` | 领取竞技场奖励 |
+
+### 圣域 `sanctuary`
+
+| 模板名 | 用途 |
+|---|---|
+| `sanctuary/btn_collect_all` | **退出条件**：一键收取（收完它就消失了） |
+| `sanctuary/btn_forest` / `sanctuary/btn_summon_creature` | 森林生物（可选） |
+
+### 派遣 `dispatch`
+
+| 模板名 | 用途 |
+|---|---|
+| `dispatch/mark_completed` | 已完成的派遣标记 |
+| `dispatch/btn_resend` / `dispatch/btn_resend_confirm` | 重新派遣 / 确认 |
+
+### 免费抽卡 `summon`
+
+| 模板名 | 用途 |
+|---|---|
+| `summon/btn_free` | **退出条件**：免费召唤按钮（没有它就是今天抽完了） |
+| `summon/no_free` | 明确表示"免费次数已用完" |
+| `summon/btn_confirm` / `summon/btn_confirm_2` | 两级确认 |
+
+### 录制生成的进本序列 `seq/*`
+
+用 `python run.py record` 自动生成，命名是 `seq/step_01`、`seq/step_02`……
+不需要手工采。详见 README 的 §4.3。
+
+### OCR 数字字形 `ocr/digits/*`
+
+用于读体力/金币/剩余次数（见 [docs/OCR.md](../../docs/OCR.md)）：
+
+```
+ocr/digits/0.png ~ 9.png    必需
+ocr/digits/k.png            千（"1.2k" -> 1200）
+ocr/digits/m.png            百万（"3.5m" -> 3500000）
+ocr/digits/dot.png          小数点
+ocr/digits/slash.png        斜杠（读 "12/20" 这种形式）
+```
+
+**采集要点**：只框数字本身，**不要带背景**；一个数字一张图；
+尽量在数字清晰、没有选中高亮的界面上采。
 
 ### 你自己扩展的
 

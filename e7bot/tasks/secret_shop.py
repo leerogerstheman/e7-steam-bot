@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Optional
 
 from .base import Task, register
 
@@ -53,6 +53,12 @@ class SecretShopTask(Task):
         self.budget = int(cfg.get("gold_budget", 0) or 0)  # 0 = 不限
         self._last_action = 0.0
 
+        # 用 OCR 读真实金币数（可选）。gold_budget 只能按"刷新次数 × 单次花费"
+        # 估算，一旦游戏里涨价或买了别的东西就会算错；直接读画面上的金币最准。
+        self.gold_region = tuple(cfg["gold_region"]) if cfg.get("gold_region") else None  # type: ignore[arg-type]
+        self.min_gold = int(cfg.get("min_gold", 0) or 0)
+        self._last_gold: Optional[int] = None
+
     # ------------------------------------------------------------------ #
 
     def tick(self, bot) -> None:
@@ -75,6 +81,9 @@ class SecretShopTask(Task):
             self.done(bot, f"刷新花费已达金币预算 {self.budget}")
             return
 
+        if not self._check_gold(bot):
+            return
+
         # 一次 tick 只做一件事，动作之间留出 UI 动画时间
         if time.time() - self._last_action < 0.9:
             bot.random_sleep([0.3, 0.7])
@@ -86,6 +95,28 @@ class SecretShopTask(Task):
         self._do_refresh(bot)
 
     # ------------------------------------------------------------------ #
+
+    def _check_gold(self, bot) -> bool:
+        """用 OCR 读金币；不够就停机。返回 False 表示已经停机。
+
+        读数失败（没启用 OCR / 字形没采全 / 数字被遮挡）时**放行** ——
+        预算控制是"锦上添花"，不该因为读不出数字就拒绝工作。
+        """
+        if self.min_gold <= 0 or not self.gold_region:
+            return True
+
+        gold = bot.read_number(self.gold_region)
+        if gold is None:
+            if self._last_gold is None:
+                log.debug("读不到金币数（OCR 未启用或字形不全），跳过金币下限检查")
+            return True
+
+        self._last_gold = gold
+        log.debug("当前金币: %d（下限 %d）", gold, self.min_gold)
+        if gold < self.min_gold:
+            self.done(bot, f"金币 {gold} 低于下限 {self.min_gold}，停止刷新")
+            return False
+        return True
 
     def _try_buy(self, bot) -> bool:
         """在商品列表里找目标物品；找到就买。"""
@@ -111,6 +142,11 @@ class SecretShopTask(Task):
                 bot.click_template(self.BUY_CONFIRM, timeout=4.0, label="确认购买", required=False)
                 self.purchases += 1
                 log.info("已购买第 %d 件", self.purchases)
+                try:
+                    bot.recorder.event("purchase", count=1, item=name,
+                                       purchases=self.purchases, task=self.name)
+                except Exception:
+                    pass
                 bot.random_sleep(self.opt("after_purchase_delay", [1.2, 2.2]))
             else:
                 log.debug("没有找到购买按钮，可能只是选中了商品")
@@ -135,7 +171,13 @@ class SecretShopTask(Task):
         self.refreshes += 1
         log.info("已刷新第 %d 次%s", self.refreshes,
                  f"（上限 {self.max_refreshes}）" if self.max_refreshes else "")
+        try:
+            bot.recorder.event("refresh", count=1, refreshes=self.refreshes, task=self.name)
+        except Exception:
+            pass
         bot.random_sleep(self.opt("after_refresh_delay", [1.0, 1.8]))
 
     def on_finish(self, bot) -> None:
-        log.info("secret_shop 统计：刷新 %d 次，购买 %d 件", self.refreshes, self.purchases)
+        log.info("secret_shop 统计：刷新 %d 次，购买 %d 件%s",
+                 self.refreshes, self.purchases,
+                 f"，最后读到金币 {self._last_gold}" if self._last_gold is not None else "")

@@ -1,0 +1,75 @@
+name: CI
+
+# 为什么用 windows-latest 而不是 ubuntu：
+# 这个项目依赖 pywin32 / win32gui / DXGI，`e7bot.winutil` 在导入时就要求 Windows。
+# 更实际的原因是 —— 我们**只想在目标平台上验证**。跨平台跑一遍通过了
+# 也不代表在 Windows 上能跑，反而是虚假的安全感。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 是下限（用到内置 tomllib），3.13 验证向前兼容
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest pyflakes
+
+      - name: 静态检查（未用导入 / 未定义名）
+        run: python -m pyflakes e7bot run.py tools tests
+
+      - name: 离线自检（合成画面，不需要游戏）
+        run: python run.py selftest
+
+      - name: 单元测试
+        run: python -m pytest tests -q
+
+      - name: 配置校验（默认配置必须能通过）
+        run: |
+          python -c "
+          from e7bot import Config
+          cfg = Config.load('config/default.toml')
+          problems = cfg.validate()
+          assert not problems, problems
+          print('配置校验通过')
+          "
+
+      - name: CLI 冒烟（所有子命令都要能 --help，不能有导入错误）
+        run: |
+          python run.py --help
+          python run.py doctor --help
+          python run.py record --help
+          python run.py report --help
+          python run.py templates --help
+          python run.py alert-test --help
+          python run.py selftest --help
+          python run.py smoke --help
+          python run.py gui --help
+        continue-on-error: true   # gui 依赖可选的 pystray，缺失时允许失败
+
+      - name: 确认 doctor 在无游戏时干净失败（退出码 1，不是崩溃）
+        run: |
+          python run.py doctor
+          if ($LASTEXITCODE -eq 1) { Write-Host "OK: 干净失败"; exit 0 }
+          Write-Host "意外退出码: $LASTEXITCODE"; exit 1
+        shell: pwsh

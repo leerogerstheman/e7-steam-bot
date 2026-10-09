@@ -57,6 +57,11 @@ class Task:
     def done(self, bot, reason: str = "") -> None:
         self.finished = True
         log.info("任务 %s 完成%s", self.name, f"（{reason}）" if reason else "")
+        # 统一在这里记事件，所有任务都能被统计到，不用各自实现
+        try:
+            bot.recorder.event("task_done", task=self.name, reason=reason)
+        except Exception:
+            pass
         self.on_finish(bot)
 
     #: 需要在场景出现时被"清掉"的通用弹窗模板（按顺序尝试）
@@ -75,10 +80,16 @@ class Task:
         弹窗处理放在所有任务最前面：公告、体力不足、背包已满、断线重连……
         安卓端脚本最常见的死法就是被一个弹窗卡住，而 PC 端因为要长时间无人值守，
         这一环更不能省。
+
+        每个模板都单独兜住 KeyError：**用户不可能一次就把所有弹窗模板采全**，
+        少采一个不该让整个弹窗处理崩掉，只是那个弹窗暂时识别不出来而已。
         """
         for _ in range(max_clicks):
             for tpl in self.COMMON_POPUPS:
-                m = bot.find(tpl, threshold=self.opt("popup_threshold", 0.88))
+                try:
+                    m = bot.find(tpl, threshold=self.opt("popup_threshold", 0.88))
+                except KeyError:
+                    continue
                 if m is not None:
                     bot.click_match(m, label=f"关闭弹窗 {tpl}")
                     bot.random_sleep(self.opt("after_popup_delay", [0.4, 1.0]))

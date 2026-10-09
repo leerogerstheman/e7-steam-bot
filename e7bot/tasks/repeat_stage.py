@@ -115,6 +115,10 @@ class RepeatStageTask(Task):
         self.runs += 1
         log.info("第 %d 场战斗结束%s", self.runs,
                  f"（上限 {self.max_runs}）" if self.max_runs else "")
+        try:
+            bot.recorder.event("battle_finished", count=1, runs=self.runs, task=self.name)
+        except Exception:
+            pass
 
         if self.max_runs and self.runs >= self.max_runs:
             self.done(bot, f"已完成 {self.runs} 场")

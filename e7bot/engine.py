@@ -26,14 +26,25 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
+from pathlib import Path
 
+import cv2
 import numpy as np
 
+from .alerts import AlertManager
 from .capture import CaptureError, ScreenGrabber
 from .config import Config
 from .humaninput import Keyboard, Mouse, vk_of
 from .scene import SceneDetector, SceneResult
-from .vision import Match, MatchOptions, Matcher, TemplateLibrary, annotate
+from .stats import StatsRecorder
+from .vision import (
+    Match,
+    MatchOptions,
+    Matcher,
+    TemplateLibrary,
+    annotate,
+    frame_diff_ratio,
+)
 from .winutil import (
     GameNotFound,
     Rect,
@@ -188,6 +199,11 @@ class SafetyViolation(StopRequested):
     pass
 
 
+#: "还没尝试过"的哨兵。用 None 表示"尝试过但不可用"，两者要区分开，
+#: 否则每次读数都会重新初始化 OCR（扫目录 + 加载字形，很慢）。
+_UNSET: object = object()
+
+
 # --------------------------------------------------------------------------- #
 # Bot
 # --------------------------------------------------------------------------- #
@@ -221,8 +237,24 @@ class Bot:
         self._rect: Optional[Rect] = None
         self._frame_tick = -1
         self._last_scene: Optional[SceneResult] = None
+        self._last_scene_name: str = ""
         self._debug_dir = cfg.log_dir() / "frames"
         self._last_debug_dump = 0.0
+
+        # 卡死检测：画面静止超过阈值即判定卡住
+        self._frozen_ref: Optional[np.ndarray] = None
+        self._frozen_ref_ts = time.time()
+        self._stop_reason: str = ""
+
+        # 告警与统计（统计默认开；告警渠道按 config 的 [alerts] 决定）
+        self.alerts = AlertManager(cfg, cfg.log_dir())
+        self.recorder = StatsRecorder(
+            cfg.log_dir() / "stats" / "events.jsonl",
+            enabled=bool(cfg.get("stats.enabled", True)),
+        )
+
+        # OCR 读取器懒加载（见 _ocr_reader）
+        self._ocr: object = _UNSET
 
     # ------------------------------------------------------------------ #
     # 生命周期
@@ -283,6 +315,20 @@ class Bot:
             "  [DRY-RUN 模式：只识别不点击]" if self.dry_run else "",
         )
 
+        channels = self.alerts.active_channels()
+        if channels:
+            log.info("告警渠道: %s", ", ".join(channels))
+            log.info("可用 `python run.py alert-test` 验证告警是否真的能送到你手上。")
+
+        self.recorder.event(
+            "run_start",
+            dry_run=self.dry_run,
+            profile=self.lib.profile,
+            templates=len(self.lib),
+            window=self.window.title,
+            resolution=[self.window.client.width, self.window.client.height],
+        )
+
     def stop(self) -> None:
         keep_display_awake(False)
         if self.hotkeys:
@@ -294,6 +340,19 @@ class Bot:
                 pass
             self.grabber = None
         log.info("已停止。%s", self.stats.summary())
+        try:
+            self.recorder.event(
+                "run_end",
+                duration_seconds=round(self.stats.uptime, 1),
+                ticks=self.stats.ticks,
+                clicks=self.stats.clicks,
+                keys=self.stats.keys,
+                errors=self.stats.errors,
+                reason=self._stop_reason,
+            )
+            self.recorder.close()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # 安全
@@ -313,6 +372,50 @@ class Bot:
         limit = int(self.cfg.get("safety.max_consecutive_errors", 8))
         if self.stats.consecutive_errors >= limit:
             raise SafetyViolation(f"连续出错 {limit} 次，自动停止（请看日志定位原因）")
+
+        self.check_frozen()
+
+    def check_frozen(self) -> None:
+        """画面长时间完全静止 -> 判定卡死。
+
+        为什么用"画面是否变化"而不是"多久没动作"：战斗中脚本本来就该什么都不做，
+        可能持续好几分钟。所以"没动作"不是卡死信号。
+
+        但画面**完全静止**是强信号 —— 游戏即使在加载也会有动画/进度条，
+        正常挂机时画面几乎不可能连续几分钟一个像素都不变。真静止了，
+        要么是弹了个没采到模板的对话框在等人点，要么是游戏崩了。
+
+        为了让"完全静止"更鲁棒，先把画面降采样到 160x90 再比：
+        既快，又能忽略掉抗锯齿级别的噪声抖动。
+        """
+        limit = float(self.cfg.get("safety.frozen_timeout", 180.0))
+        if limit <= 0:
+            return
+
+        img, _rect = self.frame()
+        if self._frozen_ref is None or self._frozen_ref.shape != (90, 160, 3):
+            self._frozen_ref = cv2.resize(img, (160, 90))
+            self._frozen_ref_ts = time.time()
+            return
+
+        small = cv2.resize(img, (160, 90))
+        if frame_diff_ratio(small, self._frozen_ref, 12) > 0.01:
+            # 画面变了：刷新基准
+            self._frozen_ref = small
+            self._frozen_ref_ts = time.time()
+            return
+
+        frozen = time.time() - self._frozen_ref_ts
+        if frozen > limit:
+            path = self._dump_debug_frame("frozen")
+            self.recorder.event("stuck", reason=f"画面静止 {frozen:.0f}s", scene=self._last_scene_name)
+            self.alerts.stuck(
+                f"画面已经 {frozen:.0f} 秒完全没有变化（阈值 {limit:.0f}s）。\n"
+                f"最后识别的场景: {self._last_scene_name or '未知'}\n"
+                f"多半是弹了一个没采到模板的对话框在等点击，或者游戏卡住了。",
+                path,
+            )
+            raise SafetyViolation(f"画面静止 {frozen:.0f} 秒（阈值 {limit:.0f}s），判定卡死")
 
     def wait_if_paused(self) -> None:
         while self.hotkeys and self.hotkeys.paused and not self.should_stop():
@@ -339,11 +442,27 @@ class Bot:
     def client_rect(self) -> Rect:
         if self.window is None:
             raise StopRequested("窗口已丢失")
-        if not self.window.hwnd or not ctypes.windll.user32.IsWindow(self.window.hwnd):
+        if not self._window_alive():
             raise StopRequested("游戏窗口已关闭")
-        rect = client_rect_screen(self.window.hwnd)
+        return self._validate_rect(client_rect_screen(self.window.hwnd))
+
+    def _window_alive(self) -> bool:
+        """窗口句柄是否仍然有效。单独一个方法，方便测试替换掉真实 win32 调用。"""
+        if self.window is None or not self.window.hwnd:
+            return False
+        return bool(ctypes.windll.user32.IsWindow(self.window.hwnd))
+
+    @staticmethod
+    def _validate_rect(rect: Rect) -> Rect:
+        """客户区尺寸健全性检查。
+
+        窗口被最小化时 `GetClientRect` 会返回 0x0 或者一个荒谬的小尺寸，
+        此时继续抓屏/点击毫无意义，直接安全停机比乱点好。
+        """
         if rect.width < 64 or rect.height < 64:
-            raise SafetyViolation(f"客户区尺寸异常: {rect.as_tuple()}（窗口被最小化？）")
+            raise SafetyViolation(
+                f"客户区尺寸异常: {rect.as_tuple()}（窗口被最小化或被缩到极小？）"
+            )
         return rect
 
     def frame(self) -> tuple[np.ndarray, Rect]:
@@ -392,7 +511,74 @@ class Bot:
         )
 
     def exists(self, name: str, **kw) -> bool:
-        return self.find(name, **kw) is not None
+        """模板存在且当前画面里能找到它。
+
+        模板**根本不存在**（还没采）时返回 False 而不是抛 KeyError ——
+        "没采这个模板"和"这个按钮现在不在画面上"对调用方是同一件事：
+        都表示现在不能点它。
+        """
+        try:
+            return self.find(name, **kw) is not None
+        except KeyError:
+            return False
+
+    # ------------------------------------------------------------------ #
+    # OCR（读体力 / 金币 / 剩余次数，做预算控制）
+    # ------------------------------------------------------------------ #
+
+    def _ocr_reader(self):
+        """懒加载数字识别器。
+
+        * `[ocr] enabled = false`（默认）-> 直接返回 None，零开销；
+        * 字形不全 -> 提示一次缺哪些，之后不再重复提示；
+        * 任何异常都吞掉并返回 None —— 读不出数字只该让"预算控制"失效，
+          绝不该让整个脚本挂掉。
+        """
+        if self._ocr is _UNSET:
+            self._ocr = None
+            if bool(self.cfg.get("ocr.enabled", False)):
+                try:
+                    from .ocr import make_digit_reader
+
+                    reader = make_digit_reader(self.matcher, self.cfg.section("ocr"))
+                    if reader.is_available():
+                        self._ocr = reader
+                        log.info("OCR 数字识别已就绪（用自采字形）")
+                    else:
+                        missing = reader.missing_glyphs()
+                        log.warning(
+                            "OCR 已启用但数字字形不全，缺: %s —— 用 `python run.py capture` "
+                            "采 templates/<profile>/ocr/digits/0.png ~ 9.png",
+                            ", ".join(missing[:12]),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("OCR 初始化失败，读数功能不可用: %s", exc)
+        return self._ocr  # type: ignore[return-value]
+
+    def read_number(self, region: tuple[float, float, float, float]) -> Optional[int]:
+        """读一个区域里的整数（例如金币数）。读不出来返回 None。"""
+        reader = self._ocr_reader()
+        if reader is None:
+            return None
+        img, rect = self.frame()
+        try:
+            reading = reader.read(img, rect, region)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("OCR 读数异常: %s", exc)
+            return None
+        return reading.value if reading is not None else None
+
+    def read_text(self, region: tuple[float, float, float, float]) -> Optional[str]:
+        """读一个区域里的原始文本（例如 "12/20"）。读不出来返回 None。"""
+        reader = self._ocr_reader()
+        if reader is None:
+            return None
+        img, rect = self.frame()
+        try:
+            return reader.read_text(img, rect, region)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("OCR 读取异常: %s", exc)
+            return None
 
     def wait(
         self,
@@ -506,10 +692,25 @@ class Bot:
         label: str = "",
         required: bool = True,
     ) -> bool:
-        """找到模板并点击。找不到时按 required 决定抛错还是返回 False。"""
-        m = self.find(name, region, threshold)
-        if m is None and timeout > 0:
-            m = self.wait(name, timeout=timeout, region=region, threshold=threshold)
+        """找到模板并点击。找不到时按 required 决定抛错还是返回 False。
+
+        `required=False` 必须对**两种情况**都宽容：
+          * 模板已采集，但当前画面里没有（比如"确认"按钮只在弹窗里出现）
+          * 模板压根还没采集（渐进式补模板的用户会遇到）
+
+        后者如果抛 KeyError，`required=False` 就形同虚设 —— 任务里大量
+        "有就点、没有就跳过"的可选按钮会直接把脚本打挂。
+        """
+        try:
+            m = self.find(name, region, threshold)
+            if m is None and timeout > 0:
+                m = self.wait(name, timeout=timeout, region=region, threshold=threshold)
+        except KeyError:
+            if required:
+                raise
+            log.debug("模板 %s 尚未采集，按可选处理跳过", name)
+            return False
+
         if m is None:
             if required:
                 self._dump_debug_frame(f"miss_{name.replace('/', '_')}")
@@ -542,16 +743,19 @@ class Bot:
     # 调试
     # ------------------------------------------------------------------ #
 
-    def _dump_debug_frame(self, tag: str) -> None:
+    def _dump_debug_frame(self, tag: str) -> Optional[Path]:
+        """存一张带标注的调试图，返回路径（供告警附带）。"""
         if not bool(self.cfg.get("logging.save_debug_frames", True)):
-            return
+            return None
         try:
             img, rect = self.frame()
             stamp = time.strftime("%H%M%S")
-            annotate(img, rect, [], self._debug_dir / f"{stamp}_{tag}.png")
-            log.info("已保存调试图: %s", self._debug_dir / f"{stamp}_{tag}.png")
+            path = self._debug_dir / f"{stamp}_{tag}.png"
+            annotate(img, rect, [m for m in [self._last_scene.matched if self._last_scene else None] if m], path)
+            log.info("已保存调试图: %s", path)
+            return path
         except Exception:
-            pass
+            return None
 
     def maybe_dump_periodic_frame(self) -> None:
         if not bool(self.cfg.get("logging.save_debug_frames", False)):
@@ -615,7 +819,27 @@ class Bot:
 
                 self.sleep(tick_interval * random.uniform(0.75, 1.3))
         except StopRequested as exc:
-            log.info("停止: %s", exc)
+            # SafetyViolation 是 StopRequested 的子类，这里一并处理；
+            # 区分"正常结束"和"安全停机"来决定告警级别。
+            self._stop_reason = str(exc)
+            if isinstance(exc, SafetyViolation):
+                log.error("安全停机: %s", exc)
+                path = self._dump_debug_frame("safety_stop")
+                self.alerts.stopped(
+                    f"{exc}\n\n运行时长 {self.stats.uptime / 60:.1f} 分钟，"
+                    f"完成 tick {self.stats.ticks}，点击 {self.stats.clicks}。",
+                    path,
+                )
+            else:
+                log.info("停止: %s", exc)
+        except KeyboardInterrupt:
+            self._stop_reason = "Ctrl+C"
+            log.info("收到 Ctrl+C，停止")
+        except Exception as exc:  # noqa: BLE001
+            self._stop_reason = f"异常: {exc}"
+            log.exception("主循环异常退出")
+            path = self._dump_debug_frame("crash")
+            self.alerts.error(f"主循环异常退出: {exc}", path)
         finally:
             self.stop()
 
@@ -623,6 +847,13 @@ class Bot:
         """跑一遍任务链；返回 True 表示全部完成。"""
         scene = self.scene()
         log.debug("场景: %s", scene.describe())
+
+        # 只在场景**切换**时记事件 —— 每 tick 都记会把事件流刷爆，
+        # 而"停留分布"只需要切换点就能算出来。
+        if scene.name != self._last_scene_name:
+            self.recorder.event("scene", scene=scene.name, prev=self._last_scene_name or None,
+                                anchor=scene.matched.name if scene.matched else None)
+            self._last_scene_name = scene.name
 
         for task in tasks:
             if task.finished:

@@ -53,6 +53,12 @@ pause_key = "f9"
 max_runtime_minutes = 480
 # 连续多久认不出场景就自动停机（秒）。防止界面卡死时无限空转
 unknown_scene_timeout = 90.0
+# 画面**完全静止**多久判定卡死（秒），0 = 关闭。
+# 为什么用"画面是否变化"而不是"多久没动作"：战斗中脚本本来就该什么都不做，
+# 可能持续好几分钟，"没动作"不是卡死信号。但画面完全静止是强信号 ——
+# 正常挂机时游戏即使加载也有动画，连续几分钟一个像素都不变，基本就是
+# 弹了个没采到模板的对话框在等人点，或者游戏崩了。
+frozen_timeout = 180.0
 # 连续出错多少次自动停机
 max_consecutive_errors = 8
 # true = 只识别不点击。上线前务必先用它验证模板
@@ -74,6 +80,74 @@ dir = "logs"
 save_debug_frames = true
 # 定期存一张画面截图（秒）；排查"当时到底什么界面"很有用
 debug_frame_interval = 30.0
+
+# =============================================================================
+# 运行统计
+# 把每次有意义的动作写成 JSONL 事件流（logs/stats/events.jsonl），
+# 于是可以事后回答"昨晚到底刷了多少场、商店买到什么"。
+# 报表：python run.py report
+# =============================================================================
+[stats]
+enabled = true
+# 超过多少天的事件可以用 `python run.py report --prune` 清理
+keep_days = 90
+
+# =============================================================================
+# 告警
+# 无人值守最怕的不是出错，而是出错了没人知道 —— 早上起来发现卡在某个弹窗上
+# 空转了 6 小时。这里配置"出事时怎么通知你"。
+#
+# 先用 `python run.py alert-test` 验证真的能送到你手上，再开始无人值守！
+# =============================================================================
+[alerts]
+enabled = true
+# 同一个告警在这个间隔内不重复发（防止卡死时刷屏）
+min_interval_seconds = 60
+# 是否把现场截图一起发出去
+include_screenshot = true
+
+# 响铃：你就在电脑旁边时最直接
+[alerts.sound]
+enabled = true
+repeat = 3
+
+# 置顶弹窗：强提醒。会阻塞到你点击，所以只在"必须马上过来看"时开
+[alerts.messagebox]
+enabled = false
+
+# ntfy 推送：你不在电脑旁边时用。手机装 ntfy App 订阅同一 topic 即可，免注册。
+# ⚠️ topic 名等于密码 —— 别人猜到就能看到你的推送，用随机字符串。
+[alerts.ntfy]
+enabled = false
+server = "https://ntfy.sh"
+topic = ""
+# 自建实例需要 token 时填这里
+token = ""
+priority = "high"
+
+# 通用 webhook：接企业微信机器人 / Discord / 自己的服务
+[alerts.webhook]
+enabled = false
+url = ""
+
+# =============================================================================
+# OCR / 数字识别
+# 用于读体力、金币、剩余次数，实现"体力够就跑、不够就停"这类预算控制。
+#
+# 默认后端 "digits" 用你自己采集的数字字形模板做匹配（游戏数字是固定点阵字体，
+# 比通用 OCR 更准更快，且不引入几十 MB 的深度学习依赖）。
+# 字形放在 templates/<profile>/ocr/digits/ 下，命名 0.png ~ 9.png，
+# 可选 k.png / m.png / dot.png / slash.png。
+# 采集方式与普通模板一样：python run.py capture
+#
+# 详见 docs/OCR.md
+# =============================================================================
+[ocr]
+enabled = false
+backend = "digits"
+digits_prefix = "ocr/digits"
+threshold = 0.80
+scale_tolerance = 0.06
 
 # =============================================================================
 # 任务
@@ -136,8 +210,13 @@ buy_names = ["shop/item_covenant_bookmark", "shop/item_mystic_medal"]
 # 商品列表区域（归一化）
 list_region = [0.08, 0.18, 0.84, 0.62]
 refresh_cost_gold = 3
-# 刷新花费上限（0 = 不限）
+# 刷新花费上限（0 = 不限）。这是**估算**：按"刷新次数 × 单次花费"算，
+# 游戏里涨价或期间买了别的东西就会算错。
 gold_budget = 0
+# 更准的做法：用 OCR 直接读画面上的金币数，低于 min_gold 就停。
+# 需要先启用 [ocr] 并采好数字字形，然后填金币数字所在的归一化区域。
+# gold_region = [0.80, 0.02, 0.10, 0.04]
+min_gold = 0
 item_threshold = 0.88
 after_refresh_delay = [1.0, 1.8]
 after_purchase_delay = [1.2, 2.2]
@@ -179,6 +258,81 @@ after_sell_delay = [1.0, 2.0]
 # [[tasks.gear_cleanup.flow]]
 # click    = "inventory/btn_filter"
 # wait_for = "inventory/btn_sell"
+
+# -----------------------------------------------------------------------------
+# 竞技场：循环挑战直到没有对手
+#
+# 控制逻辑是专用的（循环打、战斗内开自动/跳过、出现 arena/no_opponent 就收工），
+# 但**导航步骤走配置** —— 因为每个人竞技场入口位置不同，而且活动会改版。
+#
+# entry_flow 示例：
+#   [[tasks.arena.entry_flow]]
+#   click    = "lobby/btn_arena"
+#   wait_for = "arena/btn_fight"
+# -----------------------------------------------------------------------------
+[tasks.arena]
+enabled = false
+# 0 = 不限；每小时检查一次（防止和大厅任务抢界面）
+interval_minutes = 0
+# 一次运行最多打几轮，0 = 打到没对手为止
+max_runs = 0
+popup_threshold = 0.88
+# 界面超过多久没有可执行动作就放弃（多半是模板没对准）
+step_timeout = 45.0
+entry_flow = []
+step_flow = []
+exit_flow = []
+
+# -----------------------------------------------------------------------------
+# 圣域：一键收取，收完（按钮消失）就退出
+# -----------------------------------------------------------------------------
+[tasks.sanctuary]
+enabled = false
+interval_minutes = 0
+# 是否顺便去森林召唤生物
+summon_creature = false
+entry_flow = []
+exit_flow = []
+
+# -----------------------------------------------------------------------------
+# 派遣：把所有已完成的派遣重新发出去
+# -----------------------------------------------------------------------------
+[tasks.dispatch]
+enabled = false
+interval_minutes = 0
+max_runs = 0
+entry_flow = []
+exit_flow = []
+
+# -----------------------------------------------------------------------------
+# 免费抽卡：一天一次（按天记状态，同一天不会重复进）
+# -----------------------------------------------------------------------------
+[tasks.summon]
+enabled = false
+# 每小时检查一次今天是否已经抽过
+interval_minutes = 60
+once_per_day = true
+entry_flow = []
+exit_flow = []
+
+# -----------------------------------------------------------------------------
+# 每日清单：把若干子流程按顺序跑一遍，每天一次
+#
+# 单项失败不阻塞后续 —— 一个活动改版不该让整个每日清单停摆。
+#
+# 示例：
+#   [[tasks.daily.routines]]
+#   name = "邮件"
+#   [[tasks.daily.routines.flow]]
+#   click    = "lobby/btn_mail"
+#   wait_for = "mail/btn_claim_all"
+# -----------------------------------------------------------------------------
+[tasks.daily]
+type = "daily"
+enabled = false
+interval_minutes = 60
+once_per_day = true
+routines = []
 
 # =============================================================================
 # 场景识别

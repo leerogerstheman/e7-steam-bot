@@ -20,3 +20,13 @@ pydirectinput>=1.0.4
 
 # 模板采集界面用（tkinter 是标准库，Pillow 负责把 numpy 图显示到 Tk）
 pillow>=10.0
+
+# ---------------------------------------------------------------------------
+# 可选依赖（不装也能跑，只是对应功能不可用）
+# ---------------------------------------------------------------------------
+#   托盘 GUI + 打包 exe:      pip install -r requirements-gui.txt
+#   通用文本 OCR（读中文）:   pip install rapidocr-onnxruntime
+#   测试:                     pip install pytest pyflakes
+#
+# 数字识别（读体力/金币）**不需要**额外依赖 —— 用你自己采集的数字字形做模板匹配，
+# 见 docs/OCR.md。

@@ -100,12 +100,79 @@ Steam 商店页（AppID 5019180）明确标注：
 
 `repeat_stage` 遇到 `common/popup_no_stamina`（体力不足）、
 `common/popup_inventory_full`（背包已满）会**主动停机等人工处理**，
-而不是盲目重试空转。
+而不是盲目重试空转。各玩法任务共用同一套检测（`FlowTask.FATAL_POPUPS`）。
 
 ### dry-run
 
 `run --dry-run`（或配置 `safety.dry_run = true`）只做识别和日志，**一次都不点击**。
 上线前必须先用它确认所有判断都正确。
+
+---
+
+## 3.5 无人值守：出事必须让你知道
+
+无人值守最怕的**不是出错，而是出错了没人知道** —— 早上起来发现脚本卡在某个弹窗上
+空转了 6 小时。所以有四层保障：
+
+### 一、自动停机（脚本自己停下来）
+
+| 触发条件 | 配置项 | 默认 |
+|---|---|---|
+| 运行时长超限 | `safety.max_runtime_minutes` | 480 分钟 |
+| 连续认不出场景 | `safety.unknown_scene_timeout` | 90 秒 |
+| **画面完全静止** | `safety.frozen_timeout` | 180 秒 |
+| 连续出错 | `safety.max_consecutive_errors` | 8 次 |
+
+「画面静止」这一条值得单独说：**不能用"多久没动作"来判断卡死**，因为战斗中脚本
+本来就该什么都不做，可能持续好几分钟。但画面**完全静止**是强信号 —— 正常挂机时
+游戏即使在加载也有动画/进度条，连续几分钟一个像素都不变，基本就是弹了个没采到
+模板的对话框在等人点，或者游戏崩了。
+
+### 二、告警（把消息推给你）
+
+```toml
+[alerts]
+enabled = true
+min_interval_seconds = 60      # 同一个告警 60 秒内不重复发（防刷屏）
+
+[alerts.sound]                 # 你就在电脑旁边
+enabled = true
+
+[alerts.messagebox]            # 置顶弹窗，强提醒（会阻塞到点击，慎用）
+enabled = false
+
+[alerts.ntfy]                  # 你不在电脑旁边
+enabled = false
+topic = "换成你的随机字符串"
+```
+
+**先验证再无人值守**：
+
+```powershell
+python run.py alert-test
+```
+
+ntfy 用法：手机装 [ntfy](https://ntfy.sh) App → 订阅你填的 topic → 就能收到推送，
+不需要注册账号。**topic 名等于密码** —— 别人猜到就能看到你的推送，用随机字符串。
+
+所有通知都在后台线程发送，**不会阻塞引擎**。
+
+### 三、现场证据
+
+停机时自动往 `logs/frames/` 存一张带标注的调试图（文件名含停机原因，
+如 `*_frozen.png`、`*_safety_stop.png`），告警会把它一起发出去。
+看一眼图就知道当时停在哪个界面。
+
+### 四、事后复盘
+
+```powershell
+python run.py report            # Markdown 报表：刷了多少场、效率、最近的问题
+python run.py report --sessions # 最近几次运行的时间和结束原因
+python run.py report --csv stats.csv
+```
+
+每次运行都会记 `run_start` / `run_end`（含结束原因），
+所以"昨天为什么半夜停了"是可查的。
 
 ---
 

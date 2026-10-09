@@ -128,8 +128,11 @@ python run.py doctor --list-windows     # 找不到窗口时，列出所有窗�
 # ①' 硬件冒烟测试：真抓屏 + 真发 SendInput（只移动鼠标，不点击）
 python run.py smoke
 
-# ② 采模板（最关键的一步，见下）
+# ② 采模板（最关键的一步，见 §4.1）
 python run.py capture
+
+# ②' 或者更省事：录一遍真人操作，自动裁模板 + 生成进本序列（见 §4.3）
+python run.py record
 
 # ③ 看识别准不准：实时打印场景判定 + 所有锚点的匹配分数
 python run.py probe --duration 60
@@ -137,8 +140,12 @@ python run.py probe --duration 60
 # ④ 干跑：只识别不点击，确认整条流程的判断都对
 python run.py run --dry-run
 
-# ⑤ 正式运行
+# ⑤ 正式运行（建议先跑一次 alert-test，确认出事时能找到你）
+python run.py alert-test
 python run.py run
+
+# 事后看战果
+python run.py report
 ```
 
 运行中：**F12 急停**，**F9 暂停/继续**（都可改配置）。
@@ -211,7 +218,11 @@ templates/default/battle/btn_retry.json   元数据
 ### 4.2 配置进本导航
 
 自动刷本需要一个「从大厅走到关卡」的点击序列。这部分**没法预设**——
-每个人的关卡位置、当前活动都不一样。在 `config/default.toml` 里按格式填：
+每个人的关卡位置、当前活动都不一样。有两种做法：
+
+**做法 A（推荐）：用录制工具自动生成** —— 见 §4.3。
+
+**做法 B：手写** —— 在 `config/default.toml` 里按格式填：
 
 ```toml
 [[tasks.repeat_stage.enter_sequence]]
@@ -223,17 +234,73 @@ delay    = [0.8, 1.6]                   # 点完随机停顿（可省）
 
 每一步都是「找模板 → 点击 → 等下一个模板出现」，找不到就报错停机，**绝不盲点**。
 
+### 4.3 录制回放（省掉大部分手工活）
+
+```powershell
+python run.py record
+```
+
+1. 按 **F8** 开始录制
+2. 在游戏里**正常手动操作一遍**（例如：大厅 → 冒险 → 选关卡 → 开始战斗）
+3. 再按 **F8** 结束
+
+工具会自动完成：
+
+* 记录每次点击的归一化坐标（只记落在游戏窗口内的点击）
+* 从**点击前**的画面里自动裁出模板，并自动收缩到"在全屏里唯一匹配"的可靠尺寸
+* 落盘模板 + sidecar 元数据到 `templates/<profile>/seq/`
+* 生成 `config/recorded_sequence.toml`，里面是可直接粘贴的 `enter_sequence` 配置，
+  并自动推导每一步的 `wait_for`（第 i 步等第 i+1 步的模板出现）
+
+**为什么模板要取自"点击前"的画面**：点击被系统处理前界面还是原样；按下之后可能
+已经在切场景了。所以工具用后台线程持续抓帧存进环形缓冲，检测到按下时回溯取
+时间戳最接近的那一帧。
+
+**为什么不挂钩子**：全局鼠标钩子（`SetWindowsHookEx` / `pynput`）能更精确地拿到
+点击，但钩子是一种"注入式"行为，内核级反作弊有理由注意到它。轮询
+`GetAsyncKeyState` + `GetCursorPos` 只是**读取系统状态**，和任何程序查询鼠标位置
+没有区别。代价是可能漏掉极短的点击（<10ms），但真人点击通常 50~150ms，够用。
+
+录制完**务必先 `run --dry-run` 验证**：录到的模板质量取决于当时的画面，
+某一步找不到就用 `run.py capture` 手动重采那一个。
+
 ---
 
 ## 5. 功能模块
+
+### 游戏玩法任务
 
 | 任务 | 状态 | 说明 |
 |---|---|---|
 | `repeat_stage` | ✅ 完整 | **主力功能**。战斗里确保 AUTO/倍速开着 → 结算点「再次挑战」→ 循环；游戏内重复次数用完后按 `enter_sequence` 重新进本。含战斗超时保护、致命弹窗识别（体力不足/背包满） |
 | 弹窗清理 | ✅ 内建 | 所有任务共用。公告、体力不足、背包满、断线重连等自动关闭。**这是无人值守最容易翻车的地方** |
 | `secret_shop` | ✅ 完整 | 秘密商店自动刷新 + 按模板识别目标商品自动购买。含刷新次数/金币预算上限 |
-| `sequence` | ✅ 通用 | **配置驱动**的任意 UI 序列：定时领邮件、圣域收菜、派遣、每日任务。可起多个实例 |
+| `arena` | ✅ 完整 | 竞技场：循环挑战直到没有对手。战斗内自动开自动/跳过，出现 `arena/no_opponent` 或达到 `max_runs` 收工 |
+| `sanctuary` | ✅ 完整 | 圣域一键收取，收完（按钮消失）自动退出；可选森林生物召唤 |
+| `dispatch` | ✅ 完整 | 派遣：把所有已完成的派遣重新发出去 |
+| `summon` | ✅ 完整 | 免费抽卡，**按天记状态**，同一天不会重复进 |
+| `daily` | ✅ 完整 | 每日清单编排：把若干子流程按顺序跑一遍，每天一次。单项失败不阻塞后续 |
+| `sequence` | ✅ 通用 | 配置驱动的任意 UI 序列，可起多个实例（邮件、声望、活动等） |
 | `gear_cleanup` | ⚠️ 需校准 | 批量出售装备。配置驱动 + 安全闸（已锁定装备检测、单次上限）。**第一次务必 dry-run** |
+
+> 所有玩法任务的**导航步骤走配置**（因为每个人入口位置不同、活动会改版），
+> 但**控制逻辑是专用代码**（循环条件、停止条件、按天去重）。
+> 这个分工比"全塞进配置"清楚，也比"全硬编码"耐用。
+
+### 支撑子系统
+
+| 子系统 | 说明 |
+|---|---|
+| **模板采集** | 交互式框选 + 立刻回验分数（`run.py capture`） |
+| **录制回放** | 手动操作一遍，自动裁模板 + 生成进本序列（`run.py record`）—— 见 §4.3 |
+| **告警** | 声音 / 置顶弹窗 / ntfy 推送 / webhook，出事时让你知道（`run.py alert-test` 验证） |
+| **卡死检测** | 画面完全静止超时即判定卡住并停机告警 |
+| **运行统计** | JSONL 事件流 + Markdown/CSV 报表（`run.py report`） |
+| **模板管理** | 健康检查 / 批量调阈值 / 去重 / 找未使用（`run.py templates`） |
+| **OCR** | 用自采数字字形读体力/金币/次数，做预算控制（见 [docs/OCR.md](docs/OCR.md)） |
+| **托盘 GUI** | 图形界面 + 打包 exe（见 [docs/GUI.md](docs/GUI.md)） |
+| **离线自检** | 135 项自动化测试，不需要游戏（`run.py selftest` + `pytest`） |
+| **硬件冒烟** | 真抓屏 + 真发输入，验证截图后端与坐标换算（`run.py smoke`） |
 
 ---
 
@@ -245,6 +312,7 @@ delay    = [0.8, 1.6]                   # 点完随机停顿（可省）
 [safety]
 fail_safe_key = "f12"          # 急停键
 dry_run = false                # true = 只识别不点击
+frozen_timeout = 180.0         # 画面完全静止多久判定卡死（0=关闭）
 
 [input]
 speed = 1.0                    # >1 更快；<1 更慢更保守
@@ -258,6 +326,15 @@ default_threshold = 0.86       # 全局匹配阈值，误判多就调高，识�
 
 [tasks]
 active = ["repeat_stage"]      # 要跑的任务，按顺序
+
+[alerts]                       # 出事时怎么通知你（先跑 alert-test 验证）
+enabled = true
+[alerts.ntfy]
+enabled = false
+topic = ""                     # 手机装 ntfy App 订阅同一 topic
+
+[stats]
+enabled = true                 # 记事件流，供 `run.py report` 出报表
 ```
 
 ---
@@ -273,6 +350,12 @@ active = ["repeat_stage"]      # 要跑的任务，按顺序
 | 分数 0.6~0.86 之间 | 典型是模板带了背景、或画面有动态元素。重采，或适度降低该模板阈值 |
 | 场景识别乱跳 | 用通用按钮（`btn_ok` 之类）当了场景锚点，换成该界面**独有**的元素 |
 | 报「连续 N 秒无法识别场景」 | 停在某个没采过的界面了。看 `logs/frames/` 里自动存的调试图 |
+| 报「画面静止 N 秒，判定卡死」 | 多半是弹了个没采到模板的对话框在等人点。看 `logs/frames/*_frozen.png`，采上那个弹窗的关闭按钮 |
+| 脚本莫名停机但日志没线索 | 看 `run.py report` 的「最近的问题」一节；停机时都有截图和原因记录 |
+| 告警没收到 | `run.py alert-test` 验证；ntfy 要填 topic 且手机订阅同一 topic（topic 名等于密码，用随机串） |
+| 玩法任务进去就"完成"了 | 检查画面里是不是有 `common/popup_no_stamina` 之类的致命弹窗模板被误匹配，或 `arena/no_opponent` 被误判 |
+| 录制出来的模板 dry-run 找不到 | 录制时画面有动画/过渡。重新录那一段，或用 `run.py capture` 手动重采 |
+| 模板匹配率在下降 | `run.py templates health` 体检；`unused` 找僵尸模板；`dedupe` 找重复 |
 | 想换分辨率 | 不用改任何配置，直接换 —— 模板会按 `ref_size` 自动缩放 |
 
 调试图、运行日志都在 `logs/` 下。
@@ -283,42 +366,71 @@ active = ["repeat_stage"]      # 要跑的任务，按顺序
 
 ```
 e7bot/
-├── run.py                  CLI 入口（doctor / capture / probe / run / selftest）
+├── run.py                  CLI 入口（doctor/smoke/capture/record/probe/templates/
+│                           alert-test/report/run/gui/selftest）
 ├── config/default.toml     全注释配置
 ├── e7bot/
 │   ├── winutil.py          窗口定位、客户区矩形、DPI 感知、多显示器
-│   ├── capture.py          截图后端（bettercam/mss/printwindow）+ 黑屏自动降级
+│   ├── capture.py          截图后端（bettercam/mss/printwindow）+ 黑屏/失败自动降级
 │   ├── humaninput.py       SendInput 封装：贝塞尔鼠标轨迹、随机化、扫描码键盘
-│   ├── vision.py           分辨率无关模板匹配、多尺度、NMS、颜色/灰度判断
+│   ├── vision.py           分辨率无关模板匹配、多尺度、±1px 补偿、NMS、灰度判断
 │   ├── scene.py            场景状态机（any/none 规则 + 优先级）
-│   ├── engine.py           主循环、安全闸、热键、统计、调试帧
+│   ├── engine.py           主循环、安全闸、冻结检测、热键、统计、调试帧
+│   ├── alerts.py           告警（log/sound/messagebox/ntfy/webhook）+ 限流
+│   ├── stats.py            JSONL 事件流 + Markdown/CSV 报表
+│   ├── ocr.py              数字/文本识别（自采字形优先，rapidocr 可选）
+│   ├── gui.py              系统托盘 GUI
 │   ├── config.py           TOML 配置（零依赖，用内置 tomllib）
-│   └── tasks/              功能模块（repeat_stage / secret_shop / sequence / gear_cleanup）
+│   └── tasks/              repeat_stage / secret_shop / sequence / gear_cleanup
+│                           + flow_tasks（arena/sanctuary/dispatch/summon/daily）
 ├── tools/
 │   ├── capture_template.py 交互式模板采集器（框选 + 自动回验）
+│   ├── record.py           录制回放（录操作 → 自动裁模板 → 生成配置）
+│   ├── template_admin.py   模板批量管理（健康检查/阈值/去重/未使用）
 │   ├── probe.py            实时场景探针
 │   ├── smoke_hardware.py   硬件冒烟测试（真抓屏 + 真发输入）
-│   └── selftest.py         离线自检（合成画面，71 项断言）
+│   ├── build_exe.py        打包 exe
+│   └── selftest.py         离线自检（合成画面）
+├── tests/                  135 项 pytest（conftest 用假窗口/假截图/假输入驱动）
+├── docs/                   SAFETY / OCR / GUI / 调研报告
 └── templates/default/      模板库（按 profile 分组）
 ```
 
-### 两级验证
+### 三级验证
 
-**`run.py selftest`** —— 不需要游戏，验证识别链路（合成画面，71 项断言）：
+| 级别 | 命令 | 验证什么 | 需要游戏？ |
+|---|---|---|---|
+| 单元/集成 | `pytest` | 引擎调度、任务状态机、输入事件构造、截图降级、告警限流、统计读写、视觉链路、录制裁剪、模板管理、OCR | ❌ |
+| 离线自检 | `run.py selftest` | 合成画面上的完整识别链路（74 项断言） | ❌ |
+| 硬件冒烟 | `run.py smoke` | 真抓屏（后端可用性/帧率）、真发 SendInput（坐标换算精度） | ❌ 但需要真桌面 |
 
-坐标换算与跨分辨率一致性、模板匹配与自动缩放、±1px 取整补偿、多尺度兜底、
-多目标 + NMS、灰度判断、场景优先级、配置校验与 TOML 往返、配置驱动序列。
+当前规模：**234 项 pytest + 74 项自检断言**，`pyflakes` 全树干净。
 
-**`run.py smoke`** —— 需要真机，验证硬件层：截图后端可用性与帧率、
-SendInput 绝对坐标换算（含负原点多显示器）、贝塞尔插值落点精度。
-
-> 这两级测试**都真的抓到过 bug**：
-> - 合成测试发现"缩放比非整数倍时模板尺寸 `round()` 差 1px，小模板就会失配"
+> 这些测试**都真的抓到过 bug**，不是摆设：
+> - 合成测试发现"缩放比非整数倍时模板尺寸 `round()` 差 1px，小模板失配"
 >   → `vision.py` 加了 ±1px 尺寸补偿
 > - 硬件测试发现"贝塞尔插值最后一个事件被系统合并丢掉，落点最大偏 49px"
 >   → `humaninput.py` 加了插值后的精确落点补偿
-> - pytest 化时发现 `_test_scene` 隐式依赖 `_test_vision` 先写入模板（共享临时目录
->   才通过）→ 改为自给自足
+> - pytest 化时发现 `_test_scene` 隐式依赖 `_test_vision` 先写入模板（共享临时目录才通过）
+>   → 改为自给自足
+> - 补测试时发现 `dismiss_popup` 没兜 KeyError（少采一个弹窗模板就崩）、
+>   `click_template(required=False)` 对"模板根本没采"仍抛 KeyError、
+>   截图后端**初始化成功但抓帧失败**时不会降级、`FlowTask` 进入玩法界面后
+>   再也拿不到 tick → 全部已修
+> - 写 OCR 预算测试时发现 `dump_toml` 遇到 `None` 直接抛错 —— 而 TOML 规范里
+>   根本没有 null 类型，正确做法是序列化时跳过 → 已修
+
+### 实测数据（开发机，双 2560×1440，虚拟桌面原点 `-2560,0`）
+
+| 项目 | 结果 |
+|---|---|
+| `bettercam`（DXGI） | **62 fps** ✓ |
+| `mss`（GDI） | 24 fps ✓ |
+| `printwindow` | **全黑** ✗（印证"GPU 合成的 DX 窗口抓不到"） |
+| SendInput 坐标换算 | 4/4 测试点 **误差 0px**（含负原点） |
+| 贝塞尔插值落点 | 4/4 测试点 **误差 0px** |
+| OCR 数字识别 | 换字体 + 亮/暗底 **20/20 正确**；1280×720 以上可用，1024×576 读不出（如实标注） |
+| 打包 exe | `dist/e7bot-gui.exe` **68.3 MB**，PE 清单 `requireAdministrator` 已确认 |
 
 ---
 

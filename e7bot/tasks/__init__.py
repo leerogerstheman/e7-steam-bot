@@ -22,6 +22,14 @@ from typing import Any
 
 from ..config import Config
 from .base import REGISTRY, ClickSequence, Task  # noqa: F401  (re-export)
+from .flow_tasks import (  # noqa: F401  (导入即注册)
+    ArenaTask,
+    DailyRoutineTask,
+    DispatchTask,
+    FlowTask,
+    FreeSummonTask,
+    SanctuaryTask,
+)
 from .gear_cleanup import GearCleanupTask
 from .repeat_stage import RepeatStageTask
 from .secret_shop import SecretShopTask
@@ -35,6 +43,12 @@ __all__ = [
     "SecretShopTask",
     "SequenceTask",
     "GearCleanupTask",
+    "FlowTask",
+    "ArenaTask",
+    "SanctuaryTask",
+    "DispatchTask",
+    "FreeSummonTask",
+    "DailyRoutineTask",
     "build_tasks",
 ]
 

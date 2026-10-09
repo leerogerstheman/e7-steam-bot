@@ -1,0 +1,24 @@
+# 第七史诗 Steam / PC 端自动化脚本 —— 系统托盘 GUI 依赖
+#
+#     pip install -r requirements-gui.txt
+#
+# 这两个包**只服务于托盘 GUI**，不是跑任务必需的：
+# 只用命令行（python run.py run）的话可以不装。
+# 反过来，不装 pystray 时 `python -m e7bot.gui` 会给出中文提示而不是 traceback。
+
+# 托盘图标（Windows 后端 pystray._win32 依赖 pywin32，已在 requirements.txt 里）
+pystray>=0.19
+
+# 画图标：图标在内存里用 Pillow 现画，不依赖外部 .ico 文件
+# （打包成 onefile 后资源路径会变，外部图片是经典翻车点）
+Pillow>=10.0
+
+# ---------------------------------------------------------------------------
+# 打包成 exe 时才需要（tools/build_exe.py 会检查）。默认不装，避免污染运行环境：
+#
+#     pip install pyinstaller
+#
+# 装完执行：
+#
+#     python tools/build_exe.py
+# ---------------------------------------------------------------------------
