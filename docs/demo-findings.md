@@ -516,3 +516,111 @@ STOVE SDK 的 HTTP 会话**会自动读系统代理**（WinINET）。所以：
 3. **代理的"节点名"不等于出口国。** 标着日本、出口在新加坡，直接导致 `device_nation=SG`。
    **验证方法**：`Invoke-RestMethod https://ip-api.com/json/` 看 `country`（注意 PowerShell
    默认走系统代理，所以"直连"那次其实也走了 clash —— 要测真直连得显式指定不走代理）。
+
+### 7.10 ⭐⭐⭐ `code:101` 的最终定位：**STOVE 的地理位置库把机房 IP 判成了新加坡**
+
+§7.9 说"地区由代理出口 IP 决定"是对的，但没说清**是谁**在判定 —— 这才是最后一块拼图。
+
+#### 证据链
+
+**第一步：`device_nation` 确实来自 `ifconfig.me`。** 日志时序对得严丝合缝：
+
+```
+08:49:18.614  URL: http://ifconfig.me?&ts=1791622158613
+08:49:35.122  收到 10390 字节（耗时 16 秒）
+08:49:35.123  URL: .../policy/total?...&device_nation=SG     ← 紧接着就是 SG
+```
+
+**第二步：那个页面里只有 IP，没有国家。** 实测抓取（同一时刻、同一路径）：
+
+| 路径 | `ifconfig.me` 报告的 IP |
+|---|---|
+| 经 clash | **`66.90.99.210`**（FDCservers.net，日本机房） |
+| 真直连（不走代理） | `36.152.140.66`（China Mobile，江苏） |
+
+页面正文只有 `Your Connection IP Address 66.90.99.210` —— **没有国家字段**。
+所以 STOVE 是拿这个 IP 去查**它自己的地理位置库**。
+
+**第三步：各家地理位置库对这个 IP 的判定互相打架。**
+
+```
+ip-api.com   -> Japan (JP) Tokyo        ISP=FDCservers.net  AS30058
+ipinfo.io    -> JP Tokyo/Ebara          AS30058 FDCservers.net
+STOVE 的库   -> SG（新加坡）             ← 它按这个判的
+```
+
+`66.90.99.21x` 属于 **FDCservers.net（机房/IDC 提供商）**。机房 IP 的
+地理位置登记经常与实际出口地不一致，各家库的判定差异很大。
+**STOVE 的库把它判成新加坡，而新加坡不在支持地区内 → `code:101`。**
+
+#### 结论（含一处自我修正）
+
+**⚠️ 上面"STOVE 把机房 IP 判成 SG"的推论，被后续证据削弱了。** 换节点后重测：
+
+| 启动 | 时间 | 代理出口 | `device_nation` |
+|---|---|---|---|
+| 1 | 15:46 | 日本 | **SG** |
+| 2 | 16:07 | 日本 | **SG** |
+| 3 | 16:49 | 日本（clash 重启后） | **SG** |
+
+**出口 IP 一直是日本，`device_nation` 却始终是 SG。** 如果它是按 IP 查库算的，
+换成日本节点后应该变成 JP。**它没变 → 说明它不来自 IP，而是跟着账号走。**
+
+`device_nation` 与账号的 `nationality` 同值（都是 SG），而账号是
+`STEAM_SHADOW`（Steam 登录时自动创建，创建时间可由 nickname
+`S1791609014528511` 里的时间戳 `1791609014` 反推为**当天 13:10**，即首次启动）。
+
+**更准确的结论：地区判定用的是 STOVE 账号的注册国家（SG），不是连接 IP。**
+所以换节点、换代理模式、退加速器全都无效 —— 这条排查方向本身是错的。
+
+#### STOVE 自己的策略文案印证了"连接国家 vs 注册国家"这套逻辑
+
+`D:\STOVE\L10N\`（注意语言文件在 `language\` 子目录下）里有这些键：
+
+```
+Launcher.native.LoginDialog.            You are not allowed to access the service
+                                        from this country.
+                                        「无法登录的国家。请咨询客服中心。」
+Launcher.native.GameCheckerPopup.       %1 cannot be played in your country.
+Launcher.native.Application.            The connected country has changed.
+                                        The launcher will restart.
+                                        「该地区PC客户端需重启」
+Launcher.native.NotiChildNotiWidget.    Block Overseas Logins has been enabled.
+                                        You can no longer log in from regions
+                                        outside your sign-up country.
+                                        「已设置限制海外登录。非注册国家/地区将无法登录该账号。」
+```
+
+APIModule.dll 里也有对应的函数名：
+
+```
+Stove_IModuleGameCheckerForSteamMember_GetCountryCd      ← 读「会员的国家码」
+Stove_IModuleGameCheckerForSteamGdsInfo_GetNation
+Stove_IStoveGds_GetNation
+Launcher.native.LoginDialog.qr_guide_country_code
+```
+
+**所以 STOVE 的判定输入是"会员国家码 / GDS nation"，与连接 IP 无关。**
+
+#### 下一步该验什么（**未验证，别当结论**）
+
+1. **把节点换到新加坡（= 账号注册国）再启动一次。**
+   如果通了 → 确认是"连接国家必须匹配注册国家"；
+   如果还是不行 → 说明 SG 本身不在可服务地区内，需要换账号。
+2. **打开 STOVE 启动器 `D:\STOVE\STOVE.exe` 登录**，看账号设置里能否查看/修改国家。
+3. **改用注册在日本的正式 STOVE 账号登录**（而不是 Steam 影子账号）。
+
+> **对本项目的影响：无。** 这是账号/地区策略问题，跟脚本无关；
+> 游戏一旦能进，脚本照常工作。
+
+#### 本次排查中被推翻的三个中间结论（留作教训）
+
+| 曾经的结论 | 为什么错 |
+|---|---|
+| §7.3 「雷神的 TLS 中间人导致 `code:101`」 | 退出雷神后错误照旧。观测没错（它确实做中间人），但**不是本次故障的原因** |
+| 「网络不通 / DNS 被墙」 | STOVE 的每一个 API 调用都返回 `code=0, OK`。网络是通的，卡在业务层的地区校验 |
+| §7.10 前半段「STOVE 的地理库把机房 IP 判成 SG」 | 换日本节点后 `device_nation` **仍是 SG** —— 它不跟 IP 走。真因是账号的注册国家 |
+
+**共同教训：现象与因果是两回事。** 四次都是"观测正确、归因错误"，
+每次靠**换一个变量再测一次**才纠正过来。下结论前先问自己：
+**这个现象有没有可能只是伴随现象？换掉那个变量，现象会消失吗？**
