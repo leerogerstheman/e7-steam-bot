@@ -613,14 +613,97 @@ Launcher.native.LoginDialog.qr_guide_country_code
 > **对本项目的影响：无。** 这是账号/地区策略问题，跟脚本无关；
 > 游戏一旦能进，脚本照常工作。
 
-#### 本次排查中被推翻的三个中间结论（留作教训）
+### 7.11 ⭐⭐⭐⭐ 决定性证据：地区由**服务端按连接 IP** 判定，`device_nation` 参数被忽略
+
+上面那一节（§7.10）的推论**又是错的**。真正的答案来自一个更简单的动作：
+**直接调用 STOVE 自己那个策略 API**，把 `device_nation` 参数换着国家传一遍。
+
+客户端调用的端点是（从 APIModule 日志里抄的）：
+
+```
+https://api.onstove.com/ngds/v1.1/client/policy/total
+    ?policy_grp=launcher&client_lang=zh&device_nation=<国家码>
+```
+
+#### 结果一：参数传什么都不影响返回
+
+六次调用，`device_nation` 分别传 `SG` / `JP` / `KR` / `CN` / `US` / `TW`：
+
+```json
+{"code":0,"message":"OK","value":{
+   "is_default":false, "nation":"CN", "timezone":"Asia/Shanghai",
+   "utc_offset":480, "lang":"en"}}
+```
+
+**六次返回一模一样，`nation` 恒为 `CN`。** 说明 **`device_nation` 这个参数服务器根本不看**。
+
+#### 结果二：换成走代理，`nation` 立刻变
+
+同一端点、**同样传 `device_nation=SG`**，只改请求路径：
+
+| 路径 | 返回 |
+|---|---|
+| **直连**（中国移动 36.152.140.66） | `nation='CN'`  `tz='Asia/Shanghai'`  `utc_offset=480` |
+| **经 clash**（日本节点 66.90.99.21x） | `nation='JP'`  `tz='Asia/Tokyo'`  `utc_offset=540` |
+
+重复两次结果稳定。
+
+**结论：国籍是服务端按「实际连接 IP」判定的，客户端传什么无关。**
+
+#### 这解释了全部矛盾
+
+| 现象 | 解释 |
+|---|---|
+| STOVE SDK 的每个 API 都返回 `code=0, OK` | SDK 的 HTTP 会话用 `AUTOMATIC_PROXY`（日志原话），**走了代理 → 服务端看到 JP → 通过** |
+| 日志里 `nation : JP` | 同上，是代理出口让服务端判成 JP |
+| 游戏本体却失败 | 游戏自己的 libcurl **走直连**（实测有一条直连 Akamai 的 `CloseWait` 连接）→ 服务端看到 **CN** → 中国不在支持地区 → `stove_error_not_supported_country` |
+| `device_nation=SG` 三次都不变 | **因为它被服务器忽略，只是个客户端本地噪声值。** 它稳定不代表"判定跟 IP 无关" |
+
+#### 修法
+
+**让游戏本体的 HTTP 也走代理。** 两条路：
+
+1. **设 `http_proxy` / `https_proxy` 环境变量**（推荐）
+   游戏 exe 里确实有 `http_proxy`、`https_proxy`、`HTTP_PROXY`、`HTTPS_PROXY`、
+   `all_proxy`、`no_proxy` 这 6 个 libcurl 环境变量名，**libcurl 默认就会读它们**。
+   只影响 HTTP(S)，不碰路由表、不需要提权。
+
+   ```powershell
+   # 只对本次会话有效的最干净做法：完全退出 Steam 后，在同一个终端里启动它
+   $env:http_proxy  = 'http://127.0.0.1:7897'
+   $env:https_proxy = 'http://127.0.0.1:7897'
+   $env:no_proxy    = 'localhost,127.0.0.1,192.168.*'
+   & 'e:\steam\steam.exe'
+   ```
+
+2. **开 clash 的 TUN 模式**（接管全部流量）—— 但**实测这个方案翻过车**：
+   本机开 TUN 后代理链路进入半死状态（HTTPS 全部握手失败、节点延迟 timeout），
+   而 `tun.enable` 在配置里仍是 `false`。**不推荐。**
+
+#### 验证方法
+
+改完重启游戏后，读最新那个 `BaseSDK_*.log`，看 `stove_error_not_supported_country`
+是否消失；或直接调上面那个 NGDS 端点看 `nation` 是否变成 `JP`。
+
+#### ⚠️ 本次排查共出现**五次**"观测正确、归因错误"
 
 | 曾经的结论 | 为什么错 |
 |---|---|
-| §7.3 「雷神的 TLS 中间人导致 `code:101`」 | 退出雷神后错误照旧。观测没错（它确实做中间人），但**不是本次故障的原因** |
-| 「网络不通 / DNS 被墙」 | STOVE 的每一个 API 调用都返回 `code=0, OK`。网络是通的，卡在业务层的地区校验 |
-| §7.10 前半段「STOVE 的地理库把机房 IP 判成 SG」 | 换日本节点后 `device_nation` **仍是 SG** —— 它不跟 IP 走。真因是账号的注册国家 |
+| §7.3 雷神的 TLS 中间人 | 退出雷神后错误照旧 |
+| 网络不通 / DNS 被墙 | STOVE 每个 API 都返回 `code=0, OK` |
+| §7.10 前半段 地理库把机房 IP 判成 SG | 换日本节点后 `device_nation` 仍是 SG —— 但**这个值被服务器忽略**，不能用来推断 |
+| §7.10 结论段 地区跟账号注册国家走 | 真正判定输入是**连接 IP**；账号的 `nationality` 只是同一个值的历史残留 |
+| §7.10 撤回「游戏直连中国 IP 被拒」 | **这个假设本来就是对的**，我因为一个无关的观测（`device_nation` 稳定）错误地撤回了它 |
 
-**共同教训：现象与因果是两回事。** 四次都是"观测正确、归因错误"，
-每次靠**换一个变量再测一次**才纠正过来。下结论前先问自己：
-**这个现象有没有可能只是伴随现象？换掉那个变量，现象会消失吗？**
+**教训升级版**：
+1. **换掉变量再测** —— 但前提是那个变量**真的参与判定**。
+2. **先验证"这个观测量是否被使用"，再拿它做推理。** 我拿 `device_nation`
+   推了三轮结论，而它从头到尾**根本没被服务器读取过**。一个不参与因果的量，
+   再稳定也不能作为证据。
+3. **最省事的验证方式往往不是读日志，而是直接打那个接口。** 我绕了十几步读日志、
+   查注册表、翻加密数据库；而"拿不同参数调一次那个 API"只花了一分钟就定死了答案。
+
+> **本节的两个推论（地理库误判 / 归因账号注册国家）后来都被 §7.11 推翻了。**
+> 决定性证据是"直接拿不同国家参数调用 STOVE 的 NGDS 策略 API"——
+> 服务端**忽略 `device_nation` 参数**，按**连接 IP** 判定国籍。
+> 完整结论与修法见 §7.11；五次错误归因的教训也汇总在那里。
