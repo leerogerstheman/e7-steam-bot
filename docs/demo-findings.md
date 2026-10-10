@@ -389,3 +389,49 @@ mss 实测 **56~79 fps @1280×720**，对"每 2~3 秒识别一次场景"完全�
 | 截图后端 | ⚠️ bettercam 被游戏屏蔽 → 自动降级 **mss**（可用，56~79 fps） |
 | DXGI 输出映射 | 🔧 已修（双显卡按适配器枚举，索引对不上） |
 | 游戏可玩性 | ❌ 卡在 `code:101`，根因是**雷神加速器的 TLS 中间人**（见 §7.3） |
+
+### 7.8 服务器（World）结构 —— 想玩日服的人看这里
+
+用户问能否连**日服**。查了客户端二进制 + 官方/韩媒公告，结论如下。
+
+**客户端侧的证据**：
+
+- exe 里 **只有 `world_kor` 这一个区域值**，且全 exe **只出现 1 次**，
+  形式是 `&region=world_kor`；而同族的 URL 参数模板是 `&region=`（空值）。
+  说明**区域是运行时传入的参数，`world_kor` 只是这个构建的默认/兜底值**。
+- `BaseSDK.dll` 里有 `StoveAPI_GetWorld` / `Stove_Internal_GetWorld`，
+  API 形如 `.../member/v1.0/character/member_no/{}?game_id={}&world_id={}`。
+  **World 由 STOVE SDK 决定，不是游戏内设置。**
+- `APIModule.dll` 里有 `HandleCommonPopupUnserviceableCountry` 和文案
+  `"Some games may be unavailable depending on your region."`，
+  以及 `Stove_IStoveSignin_GetRegisteredCountryCode`
+  —— **区域与 STOVE 账号的注册国家绑定**。
+- **客户端里搜不到任何"选服/选世界"相关的键**（无 `select_world`、
+  无 `server_list`、无 `choose_server`）。
+
+**官方/媒体侧的结论**（[게임동아 2026-10-08](https://game.donga.com/124602/)）：
+
+> 스팀 정식 서비스는 오는 29일부터 시작되며, 같은 날 신규 서버 **'파운드리'**도 문을 연다.
+> 파운드리 서버는 스팀뿐 아니라 PC 클라이언트 스토브와 모바일에서도 접속할 수 있다.
+> **기존 계정으로 스팀에 접속하는 것도 가능하다.** 이용자는 기존 계정 정보를 그대로
+> 활용해 스팀에서 게임을 이어서 즐길 수 있다.
+
+翻译：**10/29 Steam 正式上线，同日开放新服「Foundry」（Steam/STOVE/手机三端互通）；
+并且「可以用现有账号登录 Steam 继续玩」**。
+
+**因此**：
+
+| 想做什么 | 可行吗 |
+|---|---|
+| 用**已有的日服账号**在 Steam 上玩 | ✅ **可以** —— 官方明确支持现有账号登录 Steam 继承进度 |
+| 把已有账号**转**到日服 | ❌ 不行 —— E7 的 World 在账号创建时确定，之后不可更改（官方规则，非本次实测） |
+| 在 Steam 上**新建**账号并选日服 | ⚠️ **未确认**。客户端里没有选服 UI 的痕迹，World 由 STOVE SDK 按账号注册国家决定；日服官方站是 `epic7.onstove.com/ja/`，日服确实存在（[日服官方 X @Epic7_jp](https://x.com/Epic7_jp) 2026-08-22 官宣了 Steam 版） |
+| 在**试用版（Demo）**里选日服 | ⚠️ 大概率不行 —— Demo 实测连的是 `world_kor`，且试用记录不继承到正式版 |
+
+**对本项目的影响：无。** 各服的 UI 布局、按钮、图标一致，只是文案与活动不同。
+模板是按**画面**采的，换服不用重采（若某服用了不同语言，纯文字模板可能要重采，
+图标类不受影响）。
+
+> ⚠️ 别忘了：**日服玩家要连的是日本节点**。如果用 clash-verge 加速，
+> 记得把节点选到**日本**而不是韩国 —— 你之前那条连接去的是 `world_kor`（韩服）。
+> 但无论哪个服，**都不能用做 TLS 中间人的加速器**（见 §7.3）。
