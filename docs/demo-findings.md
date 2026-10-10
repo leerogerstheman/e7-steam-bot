@@ -236,18 +236,156 @@ OpenGL 窗口上同样抓不到（实测全黑，见 README 的实测数据表�
 | UNCHEATER 驱动是否需要额外提权步骤 | 首次启动时观察 |
 | 模板识别阈值是否合适 | `run.py probe` |
 
-**下一步**（需要你在旁边）：
+---
 
-```powershell
-# 1. 启动游戏（Steam 里点开始游戏），等到进入大厅
-# 2. 以管理员打开终端，跑自检
-python run.py doctor
-#    -> 应能看到 "游戏窗口: 'EpicSeven (Steam)'"
-#    -> 截图后端应显示 bettercam
-# 3. 采模板 / 录制进本序列
-python run.py capture        # 或 python run.py record
-# 4. 验证识别
-python run.py probe --duration 60
-# 5. 干跑
-python run.py run --dry-run
+## 7. 首次真机运行的实测结果（用户启动 Demo 之后）
+
+### 7.1 窗口标题是**中文** `第七史诗`，不是 exe 里的 `EpicSeven (Steam)`
+
+`doctor` 实测锁定到：
+
 ```
+hwnd=0x167072A pid=32628 title='第七史诗' client=(790, 397, 1280, 720)
+exe=F:\SteamLibrary\steamapps\common\Epic Seven Demo\EpicSeven_Steam.exe
+```
+
+**结论：窗口标题是按客户端语言动态设置的。** exe 里那个 `EpicSeven (Steam)` 是英文标题，
+中文客户端用的是 `第七史诗`。
+
+好消息是配置**同时覆盖了两种**：`第七史诗` 与标题完全相等 → 覆盖率 100% → 通过。
+而 §4.4 那个浏览器假阳性（覆盖率 11%）被正确拒绝。**两个用例在同一次运行里都验证到了。**
+
+### 7.2 默认分辨率 1280×720，16:9 —— 符合预期
+
+### 7.3 ⭐ 诊断出 `code:101 网络连接异常` 的根因：加速器的 TLS 中间人
+
+用户反馈"游戏没反应"。诊断过程与结论：
+
+**现象**：`doctor` 显示进程在跑、`Responding=True`、CPU 已用 419 秒、内存 817 MB；
+画面**持续动画**（每秒 0.4%~1.5% 变化）——所以**不是卡死**。
+
+**读屏幕**：用 `rapidocr` 直接 OCR 游戏画面，读出：
+
+```
+[0.99] (0.501,0.485)  网络连接异常，请重新连接。
+[1.00] (0.501,0.645)  code:101
+[0.99] (0.501,0.748)  点击重试
+[0.90] (0.090,0.985)  App:1.0.987dR:0T:0M:0S:0P:0
+```
+
+**游戏停在网络错误提示页，在等用户点「点击重试」。**
+
+**定位根因**（三条证据链）：
+
+1. 游戏用 **libcurl**（exe 里有 `curl.se/docs/alt-svc.html` / `hsts.html` / `http-cookies.html`
+   这些 libcurl 内建文档链接），并自带 `data.unpacked\ssl\cacert.pem`（**133 张证书**）。
+   **它校验的是自己打包的 CA 列表，不是 Windows 证书库。**
+2. 机器上装了 **雷神加速器**，它在 `C:\ProgramData\leigod_person_7002` 放了
+   `ca.cer` + `certimport.exe` + NSS 库（`libnspr4.dll` / `freebl3.dll` / `libplc4.dll`），
+   并把 **`CN=Leigod CA, OU=Leigod, O=Leigod, L=SH, C=CN`** 装进了 `LocalMachine\Root`。
+   **它在做 TLS 中间人拦截。**
+3. 两者一撞：雷神签发的证书**不在游戏的 133 张 CA 里** → TLS 校验失败 → `code:101`。
+
+**为什么 CDN 反而下得动**：游戏目录的 inet 缓存里有 **2.9 MB** 的
+`epic-down.game.playstove.com/.../bgm_ep0.mp3`（标题 BGM）——静态 CDN 走的是直连
+（`Find-NetRoute` 显示该连接走 WiFi，没走 clash 的 TUN），所以能下；
+而需要走加速器的那部分 API 流量被 MITM 掉了。
+
+**修法**：**完全退出雷神加速器**（不是断开，是退出进程）。
+若游戏仍需连韩服（`world_kor`），改用 **clash-verge + 韩国节点**——
+clash/mihomo 是透明转发，**不做 TLS 中间人**，端到端 TLS 保持完整，
+游戏的 CA 校验就能通过。
+
+> 顺带一提：装了这种根证书意味着该加速器**能解密这台机器上所有走它代理的 HTTPS 流量**
+> （网银、邮箱都算）。这是这类工具的固有代价，知道一下有好处。
+
+### 7.4 ⚠️ 踩坑：手动截图前必须先把游戏切到前台
+
+我第一次 OCR 读出来的是**我自己聊天窗口的文字**——因为 `mss`/DXGI 抓的是**屏幕**，
+不是窗口；我一跑命令，终端就把游戏盖住了。
+
+**这不是产品缺陷**：引擎里的 `ensure_foreground()` 每次操作前都会把游戏切回前台。
+是我那个临时诊断脚本绕过了它。修复很简单：
+
+```python
+from e7bot.winutil import activate
+activate(win.hwnd, settle=0.8)   # 手动截图/诊断前一定要做
+```
+
+切前台后立刻读到了正确的 `code:101` 画面。
+
+### 7.5 ✅ 本项目在真实游戏上跑通了
+
+这次诊断顺带证明了整条链路在真游戏上可用：
+
+| 环节 | 结果 |
+|---|---|
+| `Config.find_game_window()` | ✅ 锁定 `第七史诗`（中文标题） |
+| `ScreenGrabber`（mss 后端） | ✅ 抓到 1280×720 帧，方差 31.1 |
+| `frame_diff_ratio` 冻结检测 | ✅ 正确判定"在动画，非卡死" |
+| `activate()` 前台切换 | ✅ `is_foreground` 从 False 变 True |
+| OCR 读屏 | ✅ 读出错误码与按钮位置 |
+
+`点击重试` 按钮的归一化位置 **(0.501, 0.748)** 已经拿到——这正是
+`run.py capture` 要采的那种模板。
+
+### 7.6 ⭐ 两个必须修的真 bug（都由真机实测暴露）
+
+#### bug 1：双显卡笔记本上 bettercam 永远用不了，静默退回慢后端
+
+`bettercam` 在游戏运行时**一直没被选中**，自动降级到了 `mss`。查下去发现两层问题：
+
+**表层**：`IndexError: list index out of range`。原因是
+**DXGI 的输出是「按适配器」枚举的**，而 `monitor_index_of()` 返回的是
+Windows 的**全局显示器索引**。实测的 DXGI 枚举：
+
+```
+Device[0] Output[0]: Res:(2048, 1152) Primary:True    ← NVIDIA RTX 3060 Laptop
+Device[1] Output[0]: Res:(1707, 960)                  ← Intel UHD Graphics
+```
+
+**两块 GPU 各驱动一块屏，output 索引都从 0 开始**，而 Windows 索引是 0/1 全局的。
+把 Windows 索引 1 当 `output_idx` 传进 `device_idx=0`（NVIDIA 只有 1 个输出）→ 越界。
+**混合显卡笔记本极其常见，所以这个 bug 的影响面很大。**
+
+**修法**：用「**DXGI 报告分辨率 × 显示缩放比 = Windows 物理分辨率**」反查正确输出。
+实测数据正好印证：
+`2048×1152 × 1.25 = 2560×1440`（125% 缩放）、`1707×960 × 1.5 = 2560×1440`（150% 缩放）
+—— 两块屏 DPI 缩放还不一样。现在候选排序为 `[(1,0), (0,0), (0,None)]`，正确选到 Intel 那块。
+
+新增 `winutil.monitor_rect_of()`（显示器物理矩形，比索引可靠）、
+`capture.parse_output_info()` / `implied_scale()` / `bettercam_output_candidates()`，
+以及 9 项回归测试（用**真实**的 `output_info()` dump 字符串）。
+
+#### bug 2：游戏运行时 DXGI 桌面复制整体返回纯黑
+
+修完索引后 bettercam 能创建了，但抓出来**方差 0.00 / 均值 0.00 —— 纯黑**。
+而且**两块屏都黑**，包括**没跑游戏的那块主屏**。
+
+对比证据：
+- 游戏**没**运行时（`run.py smoke`）：bettercam 抓到方差 **94.9**、62 fps —— 正常
+- 游戏**运行中**：两块 DXGI 输出都是纯黑
+
+**结论：游戏（或其内核级反作弊 UNCHEATER）在运行时会屏蔽 DXGI Desktop Duplication。**
+这不是我们代码的问题 —— 但意味着在这台机器上**必须依赖 `mss`**。
+
+好消息是：**自动降级逻辑正确接管了**（`bettercam 疑似失效（黑屏），尝试切换 …` → 切到 mss），
+mss 实测 **56~79 fps @1280×720**，对"每 2~3 秒识别一次场景"完全够用。
+
+> 这正是当初把截图做成**多后端 + 黑屏自动降级**的价值所在：主后端被游戏屏蔽时，
+> 脚本仍然能跑，而不是直接死在启动阶段。
+>
+> **后续可考虑**：加一个 **Windows Graphics Capture（WGC）** 后端。WGC 是 Win10 19041+
+> 的现代截屏 API，走的是与 DDA 完全不同的路径，**有可能在被 DDA 屏蔽的环境下仍然可用**。
+> 这需要引入 `windows-capture` 依赖，暂未实现。
+
+### 7.7 本次实测新增/修正的清单
+
+| 项 | 结论 |
+|---|---|
+| 窗口标题 | **中文 `第七史诗`**（按客户端语言动态设置），配置已覆盖 |
+| 默认分辨率 | 1280×720，16:9，窗口化（有标题栏边框） |
+| `find_game_window` | ✅ 正确锁定，且正确拒绝了浏览器假阳性 |
+| 截图后端 | ⚠️ bettercam 被游戏屏蔽 → 自动降级 **mss**（可用，56~79 fps） |
+| DXGI 输出映射 | 🔧 已修（双显卡按适配器枚举，索引对不上） |
+| 游戏可玩性 | ❌ 卡在 `code:101`，根因是**雷神加速器的 TLS 中间人**（见 §7.3） |

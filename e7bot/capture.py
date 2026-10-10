@@ -20,17 +20,105 @@ DXGI Desktop Duplication 复制的是「显示器输出」，所以：
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 
-from .winutil import Rect
+from .winutil import Rect, is_primary_monitor, monitor_rect_of
+
+#: Windows 允许的显示缩放档位。用来把 DXGI 报告的**逻辑分辨率**
+#: 反推回 Windows 的**物理分辨率**。
+DISPLAY_SCALES: tuple[float, ...] = (
+    1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0,
+)
+
+#: bettercam.output_info() 的格式（它是人类可读的 dump，不是结构化数据）：
+#:     Device[0] Output[0]: Res:(2048, 1152) Rot:0 Primary:True
+_OUTPUT_RE = re.compile(
+    r"Device\[(\d+)\]\s+Output\[(\d+)\]:\s+"
+    r"Res:\((\d+),\s*(\d+)\)\s+Rot:(\d+)\s+Primary:(\w+)",
+    re.IGNORECASE,
+)
 
 
 class CaptureError(RuntimeError):
     pass
+
+
+def parse_output_info(text: str) -> list[tuple[int, int, int, int, bool]]:
+    """解析 `bettercam.output_info()` 的字符串。
+
+    返回 `[(device_idx, output_idx, width, height, is_primary), ...]`。
+    宽高是 **DXGI 报告的分辨率**，在开启显示缩放时会小于物理分辨率
+    （例如 2560×1440 物理 + 125% 缩放 -> 报告 2048×1152）。
+    """
+    out: list[tuple[int, int, int, int, bool]] = []
+    for m in _OUTPUT_RE.finditer(text or ""):
+        out.append((
+            int(m.group(1)), int(m.group(2)),
+            int(m.group(3)), int(m.group(4)),
+            m.group(6).strip().lower() in ("true", "1", "yes"),
+        ))
+    return out
+
+
+def implied_scale(out_w: int, out_h: int, mon_w: int, mon_h: int,
+                  tol: int = 2) -> Optional[float]:
+    """DXGI 输出分辨率 -> 目标显示器物理分辨率，需要的缩放比。对不上返回 None。"""
+    if out_w <= 0 or out_h <= 0:
+        return None
+    for s in DISPLAY_SCALES:
+        if abs(out_w * s - mon_w) <= tol and abs(out_h * s - mon_h) <= tol:
+            return s
+    return None
+
+
+def bettercam_output_candidates(monitor_rect: Rect,
+                                info_text: Optional[str] = None
+                                ) -> list[tuple[int, Optional[int]]]:
+    """给出 (device_idx, output_idx) 候选列表，**最可能的排在最前**。
+
+    为什么需要这个而不是直接传显示器索引：
+
+    DXGI 的输出是**按适配器**枚举的。双显卡笔记本上 NVIDIA 与 Intel 各驱动一块屏，
+    两块 GPU 的 output 索引**都从 0 开始**，而 Windows 的显示器索引是全局的。
+    实测踩过：把 Windows 索引 1 当 output_idx 传进去，在只有 1 个输出的 NVIDIA 上
+    直接 `IndexError` —— 于是 bettercam 静默失效、退回慢得多的 mss。
+
+    这里用「分辨率 × 缩放比」把 DXGI 输出匹配到目标显示器，匹配不上的排后面兜底，
+    调用方逐个尝试即可。
+    """
+    if info_text is None:
+        try:
+            import bettercam
+
+            info_text = bettercam.output_info()
+        except Exception:
+            return [(0, None)]
+
+    outputs = parse_output_info(info_text)
+    if not outputs:
+        return [(0, None)]
+
+    want_primary = is_primary_monitor(monitor_rect)
+    scored: list[tuple[tuple[int, int], int, Optional[int]]] = []
+
+    for dev, out, w, h, prim in outputs:
+        scale = implied_scale(w, h, monitor_rect.width, monitor_rect.height)
+        # 排序键：先看分辨率是否对得上（对得上优先），再看主显示器标志是否一致
+        key = (0 if scale is not None else 1, 0 if prim == want_primary else 1)
+        scored.append((key, dev, out))
+
+    scored.sort(key=lambda t: t[0])
+    cands: list[tuple[int, Optional[int]]] = [(dev, out) for _k, dev, out in scored]
+
+    # 最后再兜一个"让 bettercam 自己选默认输出"
+    if (0, None) not in cands:
+        cands.append((0, None))
+    return cands
 
 
 # --------------------------------------------------------------------------- #
@@ -50,21 +138,52 @@ class _Backend:
 
 
 class BettercamBackend(_Backend):
-    """DXGI Desktop Duplication（推荐）。"""
+    """DXGI Desktop Duplication（推荐）。
+
+    **必须传 `monitor_rect`**（目标显示器的物理矩形）。只给索引是不够的 ——
+    见 `bettercam_output_candidates` 的说明：DXGI 按适配器枚举输出，
+    双显卡笔记本上索引与 Windows 的显示器索引对不上。
+    """
 
     name = "bettercam"
     supports_occluded = False
 
-    def __init__(self, monitor_index: int = 0, target_fps: int = 60):
+    def __init__(self, monitor_index: int = 0, target_fps: int = 60,
+                 monitor_rect: Optional[Rect] = None, verbose: bool = False):
         import bettercam  # 延迟导入，缺库时其它后端仍可用
 
-        self._cam = bettercam.create(
-            output_idx=monitor_index, output_color="BGR", max_buffer_len=2
+        candidates = (
+            bettercam_output_candidates(monitor_rect)
+            if monitor_rect is not None and monitor_rect.width > 0
+            else [(0, None)]
         )
-        if self._cam is None:
-            raise CaptureError("bettercam 创建失败（显卡/驱动不支持 DXGI 复制）")
-        self._cam.start(target_fps=target_fps, video_mode=True)
+
+        cam = None
+        errors: list[str] = []
+        for dev_idx, out_idx in candidates:
+            try:
+                cam = bettercam.create(
+                    device_idx=dev_idx, output_idx=out_idx,
+                    output_color="BGR", max_buffer_len=2,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"device={dev_idx} output={out_idx}: {exc}")
+                cam = None
+            if cam is not None:
+                if verbose:
+                    print(f"[capture] bettercam 使用 device_idx={dev_idx} output_idx={out_idx}")
+                self._used = (dev_idx, out_idx)
+                break
+
+        if cam is None:
+            raise CaptureError(
+                "bettercam 创建失败（显卡/驱动不支持 DXGI 复制）。已尝试: "
+                + "; ".join(errors[:4])
+            )
+
+        self._cam = cam
         self._monitor_index = monitor_index
+        self._cam.start(target_fps=target_fps, video_mode=True)
         # 等待首帧
         for _ in range(40):
             if self._cam.get_latest_frame() is not None:
@@ -206,6 +325,9 @@ class ScreenGrabber:
         self.monitor_index = monitor_index
         self.target_fps = target_fps
         self.verbose = verbose
+        # 窗口所在显示器的物理矩形 —— bettercam 靠它反查正确的 DXGI 输出，
+        # 只给 monitor_index 在双显卡机器上会错（见 bettercam_output_candidates）。
+        self.monitor_rect = monitor_rect_of(hwnd)
         self._backend: Optional[_Backend] = None
         self._order = preferred or ["bettercam", "mss", "printwindow"]
         self._failed: set[str] = set()
@@ -233,7 +355,10 @@ class ScreenGrabber:
 
     def _make(self, name: str) -> _Backend:
         if name == "bettercam":
-            return BettercamBackend(self.monitor_index, self.target_fps)
+            return BettercamBackend(
+                self.monitor_index, self.target_fps,
+                monitor_rect=self.monitor_rect, verbose=self.verbose,
+            )
         if name == "mss":
             return MssBackend()
         if name == "printwindow":

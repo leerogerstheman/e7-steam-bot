@@ -42,6 +42,7 @@ python tools/build_exe.py     # 产物在 dist/
 ```
 python -m e7bot.gui [--config PATH] [--dry-run] [--tasks a,b] [--profile NAME]
                     [--tick SECONDS] [--verbose] [--allow-multi]
+                    [--selftest] [--selftest-dialog]
 ```
 
 | 参数 | 说明 |
@@ -53,9 +54,32 @@ python -m e7bot.gui [--config PATH] [--dry-run] [--tasks a,b] [--profile NAME]
 | `--tick` | tick 间隔秒，默认 0.35 |
 | `--verbose`, `-v` | DEBUG 日志 |
 | `--allow-multi` | 跳过单实例检查（调试用） |
+| `--selftest` | **自检**：不建托盘、不碰游戏，检查完就退出（退出码 0/1） |
+| `--selftest-dialog` | 自检失败时**额外**弹一个模态框（仅人工排查用，自动化禁用） |
 
 `--config` 传相对路径时先按当前工作目录找；找不到就退回**应用根目录** ——
 从开始菜单快捷方式启动时 cwd 可能是 `system32`，直接按 cwd 解析必然找不到。
+
+### `--selftest`（打包后排查的第一手段）
+
+```powershell
+dist\e7bot-gui.exe --selftest      # 退出码 0 = 正常
+```
+
+它把 GUI 依赖的东西全摸一遍：`sys.frozen` / `app_root()` / 配置载入 /
+模板与日志目录 / pystray + Pillow / `pystray._win32` 后端 /
+引擎导入（连带 cv2、numpy、pywin32、bettercam）/ 任务构建 / 单实例互斥体。
+结果同时打到 stdout（从命令行启动时可见）和 `logs/e7bot.log`。
+
+设计上的两个硬要求：
+
+* **绝不弹模态框**（默认）。`tools/build_exe.py` 会执行
+  `dist/e7bot-gui.exe --selftest` 并用退出码判断产物是否可用；
+  一旦失败路径弹 `MessageBoxW`，构建脚本就会**卡满 300 秒**然后报一个
+  误导性的超时，而不是真正失败的那一项 —— 恰好是自检最该起作用的时候。
+  需要弹窗时用 `--selftest-dialog` 显式开启。
+* **失败返回非 0**（1），成功返回 0。`--selftest` 会连带校验
+  `--tasks` 指定的任务链，所以 `--selftest --tasks 拼错的名字` 会立刻暴露。
 
 ---
 
@@ -222,15 +246,56 @@ dist/
    保证用的是当前虚拟环境里的那个，不会串到系统里的别的版本）；
 4. 把 `config/` 与 `templates/` 复制到 `dist/`（**已存在则跳过**，
    不会覆盖你已经放进去的模板）；
-5. 打印最终产物路径和大小。
+5. 打印最终产物路径和大小；
+6. **跑一次产物自检** `dist/e7bot-gui.exe --selftest`（用 `--no-smoke` 跳过）。
 
-参数：`--clean`（先删 `build/` `dist/`）、`--no-copy`（不复制外部目录）。
+参数：`--clean`（先删 `build/` `dist/`）、`--no-copy`（不复制外部目录）、
+`--no-smoke`（不启动 exe 做产物自检）。
+
+第 6 步不是锦上添花，是必需的：`--help` 这类用法**测不出打包问题**
+（argparse 在第一次导入之前就退出了）。真实踩过的坑见下一节。
+
+> exe 带 UAC 提权清单，从**非提权**终端启动会直接
+> `[WinError 740] 请求的操作需要提升`。构建脚本把这种情况当作
+> "无法判定"（只警告、不判失败），并提示你手动跑一次；
+> 在管理员终端里执行构建就能让这一步真正生效。
+
+### 打包踩过的两个真坑
+
+**1）入口脚本的相对导入会炸。**
+
+PyInstaller 把入口脚本以 `__main__` 身份执行，此时 `__package__` 是 `None`，
+于是 `from .config import Config` 抛：
+
+```
+ImportError: attempted relative import with no known parent package
+```
+
+而 `e7bot-gui.exe --help` 一切正常（argparse 在第一次相对导入之前就退出了），
+`--windowed` 下连 traceback 都看不见 —— 表现就是"双击 exe 没反应"。
+
+修法：`e7bot/gui.py` **一律用绝对导入**（`from e7bot.config import Config`），
+并在"源码直接执行"（`python e7bot/gui.py`）时把项目根塞进 `sys.path`。
+
+> 这里还有个反直觉的细节：打包后入口脚本的 `__file__` 是
+> **`<_MEIPASS>/gui.py`**（PyInstaller 把入口脚本摊平到 `_MEIPASS` 根，
+> 而不是 `<_MEIPASS>/e7bot/gui.py`），所以**不能**用
+> `Path(__file__).parent.name` 去猜包名 —— 会猜成 `_MEI000072d82`，
+> 报 `No module named '_MEI000072d82.config'`。
+
+**2）spec 里的 `SPECPATH` 是 spec 文件所在目录本身。**
+
+PyInstaller 内部等价于 `os.path.dirname(os.path.abspath(spec))`，
+**不是**它的上一级。写成 `Path(SPECPATH).resolve().parent` 会让
+`Analysis` 的入口路径整体上移一层，报
+`ERROR: script '...\e7bot\gui.py' not found`。spec 里现在还会在入口
+不存在时抛一句明确的中文错误。
 
 ### spec 里的关键设置
 
 | 设置 | 为什么 |
 |---|---|
-| `console=False` | 托盘程序不需要黑框控制台。代价是 print/traceback 全不可见，所以 GUI 的致命错误一律走 `MessageBoxW`，日志一律落文件 |
+| `console=False` | 托盘程序不需要黑框控制台。从资源管理器双击时 print/traceback 无处可去，所以 GUI 的致命错误一律走 `MessageBoxW`，日志一律落文件 |
 | `uac_admin=True` | **硬性要求**。非提权进程的键鼠事件会被 UIPI 静默丢弃 |
 | onefile（`EXE` 里直接带 `a.binaries`/`a.datas`，无 `COLLECT`） | 用户拿到一个 exe，好分发 |
 | `datas=[]` | `config/`、`templates/` 必须是外部目录 |
@@ -246,6 +311,28 @@ dist/
 > `tools/capture_template.py`（那个用 Tk 框选），把它取消注释、
 > 并把 excludes 里的 `"tkinter"` 删掉即可。
 
+### 怎么确认产物是对的
+
+```powershell
+# 1) 官方自检（非提权终端会因为 UAC 起不来，见上文说明）
+dist\e7bot-gui.exe --selftest
+
+# 2) 静态确认：Subsystem=2（无控制台）、清单里有 requireAdministrator
+#    以及入口脚本用的是绝对导入
+```
+
+实测数据（本机 Python 3.12.10 / PyInstaller 6.22.3）：
+
+| 项 | 值 |
+|---|---|
+| 产物 | `dist/e7bot-gui.exe` |
+| 大小 | 68.5 MB（71,829,543 字节） |
+| PE Subsystem | 2 = `WINDOWS_GUI`（无控制台） |
+| 清单 | 含 `requireAdministrator`，不含 `asInvoker` |
+| 入口脚本的 `IMPORT_NAME` | `e7bot.config` / `e7bot.engine` / `e7bot.tasks` / `e7bot.winutil`（绝对导入） |
+| 归档内是否有 `config`/`templates` | 无（外部目录，符合预期） |
+| 归档内是否有 `pystray._win32` / `win32timezone` | 有 |
+
 ### 分发
 
 把**整个 `dist/` 目录**拷给用户，三个东西必须在一起：
@@ -260,13 +347,15 @@ e7bot-gui.exe + config/ + templates/
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| 双击 exe 没反应 | 先看 `logs/e7bot.log`；`--windowed` 没有控制台，错误只在日志和弹框里 |
+| 双击 exe 没反应 | 先跑 `e7bot-gui.exe --selftest`（不建托盘、直接告诉你哪一项坏了），再看 `logs/e7bot.log` |
 | 弹框说缺少依赖 | `pip install -r requirements-gui.txt` |
 | 弹框说「已在运行」 | 已经有一个托盘实例，去托盘图标右键退出；调试时用 `--allow-multi` |
 | 脚本在跑但游戏没反应 | 十有八九是没提权（UIPI 静默丢弃）；看托盘有没有权限告警 |
 | 菜单状态文字不刷新 | win32 后端的菜单是**一次性构建**的，动态文本靠 `update_menu()` 重建；刷新线程 1Hz 触发，正常 1 秒内会更新 |
 | 图标是红的 | 悬停看 tooltip / 看日志。常见原因：没找到游戏窗口、配置校验失败、运行中异常 |
 | 想改模板 / 配置 | 「打开模板目录」「打开日志目录」菜单项；改完配置点「开始」会自动重新读 |
+| 任务管理器里有两个同名 exe | onefile 的正常形态：父进程是 bootloader，子进程才是 Python 应用。**强杀时两个都要杀**，只杀父进程会留下子进程继续跑 |
+| 构建脚本报"自检超时 300s" | 自检本身几秒就该结束；超时几乎一定是**有模态框在等点击**（UAC 提示 / PyInstaller 的失败弹窗）。手动跑一次 `--selftest` 看卡在哪 |
 
 ---
 
@@ -288,3 +377,13 @@ e7bot-gui.exe + config/ + templates/
    返回 `False`）。
 5. **exe 首次启动较慢**（onefile 要解压到 `%TEMP%`），体积也偏大
    （opencv + numpy 占大头）。
+6. **`dist/e7bot-gui.exe` 没法在非提权会话里被自动拉起**
+   （`CreateProcess` 直接 `WinError 740`）。所以构建脚本的产物自检在普通
+   终端里会被跳过；要让它真正生效，请在**管理员终端**里执行
+   `tools/build_exe.py`。
+   冻结形态本身已经用"同构但关掉 UAC 的孪生 exe"端到端验证过：
+   `app_root()` = exe 所在目录、配置/模板/日志都落在 exe 旁边、
+   `pystray._win32` + 引擎 + 任务链全部导入成功、自检 `rc=0`。
+7. **`--selftest` 不做真实截图/输入**：它验证的是依赖、路径与互斥体，
+   不验证"游戏窗口能否找到、模板能否匹配"——那些必须先跑
+   `python run.py doctor` 和 dry-run。

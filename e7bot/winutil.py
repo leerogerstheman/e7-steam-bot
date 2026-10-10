@@ -391,3 +391,25 @@ def monitor_index_of(hwnd: int) -> int:
         if m == hmon:
             return i
     return 0
+
+
+def monitor_rect_of(hwnd: int) -> Rect:
+    """窗口所在显示器的**物理像素**矩形。
+
+    这个比"显示器索引"有用得多：DXGI 的输出是**按适配器**枚举的，
+    双显卡笔记本上每块 GPU 各驱动一块屏、各自的输出索引都从 0 开始，
+    和 Windows 的显示器索引完全对不上（实测踩过：直接用索引会 IndexError）。
+    有了显示器的物理矩形，就能用分辨率去反查正确的 DXGI 输出。
+    """
+    try:
+        hmon = win32api.MonitorFromWindow(hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+        info = win32api.GetMonitorInfo(hmon)
+        left, top, right, bottom = info["Monitor"]
+        return Rect(left, top, right - left, bottom - top)
+    except Exception:
+        return Rect(0, 0, 0, 0)
+
+
+def is_primary_monitor(rect: Rect) -> bool:
+    """Windows 的主显示器就是原点在 (0,0) 的那一块。"""
+    return rect.left == 0 and rect.top == 0

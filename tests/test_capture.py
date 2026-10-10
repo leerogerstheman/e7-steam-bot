@@ -12,9 +12,25 @@ import pytest
 from e7bot.capture import (
     CaptureError,
     ScreenGrabber,
+    bettercam_output_candidates,
+    implied_scale,
     is_blank,
+    parse_output_info,
 )
 from e7bot.winutil import Rect
+
+#: **真实**的 bettercam.output_info() 输出（取自双显卡笔记本实测）。
+#: NVIDIA RTX 3060 驱动主屏（2560x1440 @125% -> 报告 2048x1152），
+#: Intel UHD 驱动另一块（2560x1440 @150% -> 报告 1707x960）。
+REAL_OUTPUT_INFO = (
+    "Device[0] Output[0]: Res:(2048, 1152) Rot:0 Primary:True\n"
+    "Device[1] Output[0]: Res:(1707, 960) Rot:0 Primary:False\n"
+)
+
+#: 左屏（Intel 那块），原点为负
+LEFT_MONITOR = Rect(-2560, 0, 2560, 1440)
+#: 右屏（NVIDIA 那块，Windows 主显示器）
+RIGHT_MONITOR = Rect(0, 0, 2560, 1440)
 
 
 # --------------------------------------------------------------------------- #
@@ -206,3 +222,85 @@ def test_empty_frame_treated_as_failure() -> None:
     g = Harness(["a"], lambda name: Empty(name))
     with pytest.raises(CaptureError):
         g.grab(Rect(0, 0, 100, 100), retries=2)
+
+
+# --------------------------------------------------------------------------- #
+# bettercam 的 DXGI 输出解析 —— 双显卡笔记本上的真实坑
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_output_info_real_dump() -> None:
+    outs = parse_output_info(REAL_OUTPUT_INFO)
+    assert outs == [
+        (0, 0, 2048, 1152, True),
+        (1, 0, 1707, 960, False),
+    ]
+
+
+def test_parse_output_info_tolerates_garbage() -> None:
+    assert parse_output_info("") == []
+    assert parse_output_info("not a dump at all") == []
+    assert parse_output_info(None) == []  # type: ignore[arg-type]
+
+
+def test_parse_output_info_multiple_outputs_per_device() -> None:
+    text = (
+        "Device[0] Output[0]: Res:(1920, 1080) Rot:0 Primary:True\n"
+        "Device[0] Output[1]: Res:(1280, 720) Rot:0 Primary:False\n"
+    )
+    outs = parse_output_info(text)
+    assert len(outs) == 2
+    assert outs[0][:2] == (0, 0)
+    assert outs[1][:2] == (0, 1)
+
+
+def test_implied_scale_matches_real_scaling() -> None:
+    """DXGI 报告的是**逻辑**分辨率，除以缩放比才是物理分辨率。"""
+    assert implied_scale(2048, 1152, 2560, 1440) == 1.25
+    assert implied_scale(1707, 960, 2560, 1440) == 1.5
+    assert implied_scale(2560, 1440, 2560, 1440) == 1.0
+    assert implied_scale(1280, 720, 2560, 1440) == 2.0
+
+
+def test_implied_scale_rejects_mismatch() -> None:
+    assert implied_scale(1000, 500, 2560, 1440) is None
+    assert implied_scale(0, 0, 2560, 1440) is None
+
+
+def test_bettercam_candidates_pick_intel_output_for_left_monitor() -> None:
+    """**核心回归测试。**
+
+    左屏由 Intel（Device[1]）驱动，而 Device[0]（NVIDIA）**只有 1 个输出**。
+    旧代码把 Windows 显示器索引当 output_idx 传，在 NVIDIA 上直接 IndexError，
+    于是 bettercam 静默失效、退回慢得多的 mss。
+
+    现在应该按"分辨率 × 缩放比"正确选到 (1, 0)。
+    """
+    cands = bettercam_output_candidates(LEFT_MONITOR, REAL_OUTPUT_INFO)
+    assert cands[0] == (1, 0), f"应优先选 Intel 那块，实际 {cands}"
+
+
+def test_bettercam_candidates_pick_nvidia_output_for_primary() -> None:
+    cands = bettercam_output_candidates(RIGHT_MONITOR, REAL_OUTPUT_INFO)
+    assert cands[0] == (0, 0), f"主显示器应由 NVIDIA(Device[0]) 驱动，实际 {cands}"
+
+
+def test_bettercam_candidates_always_include_fallback() -> None:
+    """候选列表末尾要留一个"让 bettercam 自己选"的兜底项。"""
+    for mon in (LEFT_MONITOR, RIGHT_MONITOR, Rect(0, 0, 1920, 1080)):
+        cands = bettercam_output_candidates(mon, REAL_OUTPUT_INFO)
+        assert (0, None) in cands, f"{mon.as_tuple()} 的候选缺兜底项: {cands}"
+
+
+def test_bettercam_candidates_handles_empty_info() -> None:
+    assert bettercam_output_candidates(RIGHT_MONITOR, "") == [(0, None)]
+
+
+def test_bettercam_candidates_prefers_resolution_match_over_primary_flag() -> None:
+    """分辨率对得上比 Primary 标志一致更重要 —— 标志可能因虚拟显示器而不可靠。"""
+    text = (
+        "Device[0] Output[0]: Res:(999, 999) Rot:0 Primary:False\n"
+        "Device[1] Output[0]: Res:(2560, 1440) Rot:0 Primary:False\n"
+    )
+    cands = bettercam_output_candidates(RIGHT_MONITOR, text)
+    assert cands[0] == (1, 0)

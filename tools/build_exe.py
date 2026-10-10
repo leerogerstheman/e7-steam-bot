@@ -176,15 +176,21 @@ def smoke_test_exe() -> bool | None:
     print("      （exe 带 UAC 提权清单，可能会弹一次 UAC；弹不出来就只能跳过）")
     try:
         proc = subprocess.run(cmd, cwd=str(DIST), capture_output=True, timeout=300)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         # 超时通常不是"自检跑得慢"（它只做导入和路径检查，正常 <5 秒），
         # 而是**某处弹了模态对话框在等点击** —— 例如管理员权限警告、
         # 或历史上 `run_selftest` 失败时弹的 MessageBoxW（那个已修掉）。
         # 所以提示要指向这个方向，而不是让用户以为只是慢。
         print("[!! ] 自检超时（300s），跳过判定")
         print("      自检本身只做导入/路径/互斥体检查，正常几秒内就该结束。")
-        print("      超时几乎一定是**有模态对话框在等点击**（UAC 提示 / 权限警告）。")
-        print(f"      请手动执行 `{exe} --selftest` 看看到底卡在哪个弹窗上。")
+        print("      超时几乎一定是**有模态对话框在等点击**（UAC 提示 / 权限警告 /")
+        print("      PyInstaller 的失败弹窗）。")
+        print(f"      请手动执行 `{exe} --selftest` 看看到底卡在哪个弹窗上；")
+        print("      另外确认没有误加 `--selftest-dialog`（那是人工排查用的，自动化禁用）。")
+        partial = (exc.stdout or b"").decode("utf-8", "replace").strip()
+        if partial:
+            print("      超时前已捕获的输出:")
+            print(partial)
         return None
     except OSError as exc:
         print(f"[!! ] 自检无法启动（{exc}），跳过判定 —— 很可能是 UAC 被拒绝")

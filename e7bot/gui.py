@@ -49,16 +49,23 @@ from typing import Any, Optional
 # 而且 `--help` 之类的用法**测不出来**（argparse 在第一次相对导入之前就退出了），
 # `--windowed` 下连 traceback 都看不见，表现就是"双击 exe 没反应"。
 #
-# 修法：把包目录的父目录塞进 sys.path，并把 __package__ 补成包名。
-# 打包后 __file__ 是 <_MEIPASS>/e7bot/gui.py，父目录正好是 _MEIPASS（已在 sys.path）；
-# 未打包直接 `python e7bot/gui.py` 时则是项目根。
+# 修法：**一律用绝对导入**（`from e7bot.config import Config`），
+# 并在"源码直接执行"（`python e7bot/gui.py`）时把项目根塞进 sys.path。
+#
+# 一个反直觉的细节：打包后入口脚本的 __file__ 是 **<_MEIPASS>/gui.py**
+# （PyInstaller 把入口脚本摊平到 _MEIPASS 根，而不是 <_MEIPASS>/e7bot/gui.py），
+# 所以**不能**用 `Path(__file__).parent.name` 猜包名 —— 会猜成 `_MEI000072d82`，
+# 报 `No module named '_MEI000072d82.config'`。包名在这里是常量。
+# 打包后 e7bot 包在 PYZ 里、_MEIPASS 已在 sys.path，什么都不用做。
 # --------------------------------------------------------------------------- #
+PACKAGE = "e7bot"
+
 if __package__ in (None, ""):  # pragma: no cover - 只在直接执行 / 打包后触发
-    _this_file = Path(__file__).resolve()
-    _package_parent = _this_file.parent.parent
-    if str(_package_parent) not in sys.path:
-        sys.path.insert(0, str(_package_parent))
-    __package__ = _this_file.parent.name
+    if not getattr(sys, "frozen", False):
+        # 源码直接执行：__file__ = <项目根>/e7bot/gui.py
+        _package_parent = Path(__file__).resolve().parent.parent
+        if str(_package_parent) not in sys.path:
+            sys.path.insert(0, str(_package_parent))
 
 # --------------------------------------------------------------------------- #
 # 可选依赖：pystray / Pillow
@@ -228,7 +235,7 @@ def load_config(path: Optional[str | Path] = None) -> Any:
 
     这里刻意不 import 顶层的 ``e7bot``（避免循环导入），直接用 ``e7bot.config``。
     """
-    from .config import Config
+    from e7bot.config import Config
 
     p = resolve_config_arg(str(path)) if path is not None else default_config_path()
     if not p.exists():
@@ -696,8 +703,8 @@ class TrayApp:
     # ------------------------------------------------------------------ #
 
     def _worker_main(self, dry_run: bool) -> None:
-        from .engine import Bot, GameNotFound, StopRequested
-        from .tasks import build_tasks
+        from e7bot.engine import Bot, GameNotFound, StopRequested
+        from e7bot.tasks import build_tasks
 
         bot: Any = None
         try:
@@ -860,7 +867,7 @@ class TrayApp:
             self._start_refresh_thread()
             log.info("托盘已就绪：右键图标打开菜单（日志目录 %s）", self._cfg.log_dir())
 
-            from .engine import is_admin
+            from e7bot.engine import is_admin
 
             if not is_admin():
                 self._warn_not_admin()
@@ -899,8 +906,23 @@ class TrayApp:
 # --------------------------------------------------------------------------- #
 
 
-def run_selftest(cfg_path: Path) -> int:
-    """返回 0 = 全部通过，1 = 有失败项。"""
+def run_selftest(
+    cfg_path: Path,
+    task_names: Optional[list[str]] = None,
+    dialog: bool = False,
+) -> int:
+    """返回 0 = 全部通过，1 = 有失败项。
+
+    ``dialog=False``（默认）时**只 print + 写日志 + 返回退出码，绝不弹模态框**。
+    这一点是硬性的：``tools/build_exe.py`` 会执行
+    ``dist/e7bot-gui.exe --selftest`` 并用退出码判断产物是否可用，
+    一旦失败路径弹了 MessageBox，构建脚本就会卡到超时，
+    报出来的是一个误导性的"超时"而不是真正失败的那一项 —— 恰好是自检最该
+    发挥作用的时候。
+
+    ``dialog=True``（对应 ``--selftest-dialog``）是给"打包后双击排查、
+    根本看不到 stdout"的人用的显式选项，自动化流程永远不要开它。
+    """
     lines: list[str] = ["e7bot-gui 自检", "=" * 68]
     failures = 0
 
@@ -932,7 +954,7 @@ def run_selftest(cfg_path: Path) -> int:
     else:
         info("配置文件不存在（将使用内置默认配置）", str(cfg_file))
 
-    # 2) 配置载入 —— 这一步会真正执行 `from .config import Config`，
+    # 2) 配置载入 —— 这一步会真正执行 `from e7bot.config import Config`，
     #    正是"相对导入在打包后失效"会炸掉的地方
     try:
         cfg = load_config(cfg_file)
@@ -970,8 +992,8 @@ def run_selftest(cfg_path: Path) -> int:
     try:
         # import_module 而不是 `from .engine import Bot`：只为了触发导入，
         # 用 from-import 会被 pyflakes 判成未使用。
-        importlib.import_module(f"{__package__}.engine")
-        from .engine import is_admin
+        importlib.import_module(f"{PACKAGE}.engine")
+        from e7bot.engine import is_admin
 
         check(True, "引擎导入 (e7bot.engine)")
         info("管理员权限", str(is_admin()))
@@ -979,9 +1001,11 @@ def run_selftest(cfg_path: Path) -> int:
         check(False, "引擎导入 (e7bot.engine)", f"{type(exc).__name__}: {exc}")
 
     try:
-        from .tasks import build_tasks
+        from e7bot.tasks import build_tasks
 
-        tasks = build_tasks(cfg)  # type: ignore[possibly-undefined]
+        # 用和真正启动时同一份任务名，这样 `--selftest --tasks 拼错的名字`
+        # 能立刻暴露出来，而不是等到点了"开始"才报错。
+        tasks = build_tasks(cfg, task_names)  # type: ignore[possibly-undefined]
         check(True, "任务构建 (e7bot.tasks)", f"{len(tasks)} 个: {[t.name for t in tasks]}")
         if not tasks:
             info("当前配置没有启用任何任务（检查 tasks.active / enabled）")
@@ -989,7 +1013,7 @@ def run_selftest(cfg_path: Path) -> int:
         check(False, "任务构建 (e7bot.tasks)", f"{type(exc).__name__}: {exc}")
 
     try:
-        from .winutil import dpi_mode
+        from e7bot.winutil import dpi_mode
 
         info("DPI 模式", str(dpi_mode()))
     except Exception as exc:  # noqa: BLE001
@@ -1032,6 +1056,11 @@ def run_selftest(cfg_path: Path) -> int:
     # 自检的定位就是"给自动化和命令行用的检查"：结果打到 stdout + 写进日志，
     # 用退出码表达成败。人工排查时从命令行跑就能看到全部内容。
     # 需要弹窗的场景（`--selftest` 之外的失败）由 main() 里的其他分支负责。
+    if failures and dialog:
+        # 显式 opt-in（--selftest-dialog）：只给"打包后双击排查、完全看不到 stdout"
+        # 的人用。自动化流程（tools/build_exe.py）永远不要开 ——
+        # MessageBoxW 会阻塞到有人点击，构建脚本会卡到超时。
+        message_box(report, f"{APP_NAME} · 自检失败", MB_OK | MB_ICONERROR | MB_TOPMOST)
     return 1 if failures else 0
 
 
@@ -1066,7 +1095,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="自检：不建托盘、不碰游戏，检查依赖/路径/互斥体后退出（打包后排查用）",
     )
+    p.add_argument(
+        "--selftest-dialog",
+        action="store_true",
+        help="自检失败时额外弹一个模态框（仅限打包后人工排查；自动化不要用，会一直阻塞）",
+    )
     return p
+
+
+def parse_task_names(value: Optional[str]) -> Optional[list[str]]:
+    """把 --tasks 的逗号分隔值解析成列表（空/None -> None，表示用配置里的 tasks.active）。"""
+    if not value:
+        return None
+    names = [t.strip() for t in value.split(",") if t.strip()]
+    return names or None
 
 
 def _guarded_main(args: argparse.Namespace) -> int:
@@ -1076,7 +1118,7 @@ def _guarded_main(args: argparse.Namespace) -> int:
     PyInstaller 弹窗，用户拿不到任何可操作的信息。
     """
     try:
-        from .winutil import enable_dpi_awareness
+        from e7bot.winutil import enable_dpi_awareness
 
         enable_dpi_awareness()  # 托盘图标 / 后续截图坐标都依赖它，越早越好
     except Exception as exc:  # noqa: BLE001
@@ -1091,9 +1133,15 @@ def _guarded_main(args: argparse.Namespace) -> int:
 
     # 自检：在建立托盘之前做完就退出，方便自动化验证打包产物
     if args.selftest:
-        return run_selftest(cfg_path)
+        # 把 --tasks 也带进去：自检要验证的正是"这次启动真正会用到的任务链"，
+        # 否则 `--selftest --tasks 打错的名字` 会假装通过。
+        return run_selftest(
+            cfg_path,
+            task_names=parse_task_names(args.tasks),
+            dialog=args.selftest_dialog,
+        )
 
-    task_names = [t.strip() for t in args.tasks.split(",") if t.strip()] if args.tasks else None
+    task_names = parse_task_names(args.tasks)
 
     inst = SingleInstance()
     if not args.allow_multi and not inst.acquire():
