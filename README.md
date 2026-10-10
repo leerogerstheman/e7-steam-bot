@@ -387,7 +387,8 @@ enabled = true                 # 记事件流，供 `run.py report` 出报表
 | 想换分辨率 | 不用改任何配置，直接换 —— 模板会按 `ref_size` 自动缩放 |
 | `doctor` 报「忽略了标题 … 游戏名只占标题的 N%」 | 那是**防误锁的保护**在起作用（比如浏览器标签页里含"第七史诗"）。若确实是你的游戏窗口标题，调小 `window.min_title_coverage` |
 | 锁到的窗口不是游戏 | 看 `doctor` 报出的标题与进程名。优先靠 `window.exe_patterns` 匹配（进程名不会被浏览器撞上）；必要时用 `exclude_title_patterns` 排掉 |
-| **游戏报 `code:101 网络连接异常`** | **实测根因：加速器的 TLS 中间人**。雷神加速器会装 `CN=Leigod CA` 根证书做 TLS 拦截，而游戏用 libcurl + **自带的 133 张 CA 列表**校验 → 证书不被信任 → 连接失败。**完全退出加速器**；若要连韩服（`world_kor`）改用 clash-verge + 韩国节点（透明转发，不做中间人）。详见 [docs/demo-findings.md](docs/demo-findings.md) §7.3 |
+| **游戏报 `code:101 网络连接异常`** | **实测真因：STOVE 的地区校验没过**（不是网络不通）。日志里写得很明白：`stove_error_not_supported_country` / 「当前国家不支持此功能」。地区由**代理出口 IP 的归属国**决定（`device_nation`）——**节点名写着日本、出口在新加坡，一样会失败**。排查第一现场：`%LOCALAPPDATA%\STOVEPCCLIENTMODULE\logs\EpicSeven_Steam\` 与 `%LOCALAPPDATA%\STOVEPCSDK3\logs\STOVE_EPIC7\`。详见 [docs/demo-findings.md](docs/demo-findings.md) §7.9 |
+| 加速器相关的另一个坑 | 雷神加速器会装 `CN=Leigod CA` 根证书做 TLS 中间人，而游戏用 libcurl + **自带的 133 张 CA 列表**校验。这**不是** `code:101` 的原因（见上），但**仍建议避开**这类会中间人的加速器 |
 | 截图后端一直是 mss，不是 bettercam | ① **双显卡笔记本**上 DXGI 按适配器枚举输出，旧版会选错 —— 已修（按"分辨率×缩放比"反查）；② **游戏运行时 DDA 可能被整体屏蔽**（实测两块屏都返回纯黑）→ 自动降级到 mss 是预期行为，mss 在 1280×720 下实测 56~79 fps，够用 |
 | 手动截图/OCR 读到的是别的窗口 | `mss`/DXGI 抓的是**屏幕**不是窗口。手动诊断前必须 `activate(hwnd)` 把游戏切到前台（引擎内部每次都做，只有自己写脚本时要注意） |
 

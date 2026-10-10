@@ -25,6 +25,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+import cv2
 import numpy as np
 
 from .winutil import Rect, is_primary_monitor, monitor_rect_of
@@ -183,6 +184,7 @@ class BettercamBackend(_Backend):
 
         self._cam = cam
         self._monitor_index = monitor_index
+        self._monitor_rect = monitor_rect
         self._cam.start(target_fps=target_fps, video_mode=True)
         # 等待首帧
         for _ in range(40):
@@ -191,15 +193,51 @@ class BettercamBackend(_Backend):
             time.sleep(0.05)
 
     def grab(self, rect: Rect) -> np.ndarray:
+        """抓取 `rect`（**屏幕物理坐标**）对应的画面。
+
+        这里有两处必须小心的地方，都踩过坑：
+
+        1. **坐标系**：DXGI 的帧覆盖的是**整块显示器**，而 `rect` 是**屏幕坐标**。
+           必须先减去显示器原点。漏掉这步时，游戏在副屏（原点为负）上会让
+           裁剪坐标全为负数、被夹成 1 像素宽 —— 而这样得到的窄条**方差并不低**，
+           黑屏检测抓不到它，表现是"模板全都不匹配"这种极难定位的症状。
+
+        2. **显示缩放**：DXGI 帧的分辨率是**缩放后**的（实测 2560×1440 的屏在
+           150% 缩放下帧只有 1707×960，125% 下是 2048×1152），而 `rect` 是物理像素。
+           所以要按 `帧尺寸 / 显示器物理尺寸` 换算。
+
+        最后把结果缩回 `rect` 的物理尺寸，保证 `grab()` 的契约始终是
+        "返回恰好 rect 宽高的图"，下游（模板匹配、OCR）不用关心后端差异。
+        """
         frame = self._cam.get_latest_frame()
         if frame is None:
             raise CaptureError("bettercam 未返回帧")
-        h, w = frame.shape[:2]
-        x0 = max(0, min(rect.left, w - 1))
-        y0 = max(0, min(rect.top, h - 1))
-        x1 = max(x0 + 1, min(rect.right, w))
-        y1 = max(y0 + 1, min(rect.bottom, h))
-        return np.ascontiguousarray(frame[y0:y1, x0:x1])
+
+        fh, fw = frame.shape[:2]
+        mon = self._monitor_rect
+
+        if mon is None or mon.width <= 0 or mon.height <= 0:
+            # 没有显示器信息（老调用路径）：退回"当作帧就是整块屏且无缩放"
+            x0 = max(0, min(rect.left, fw - 1))
+            y0 = max(0, min(rect.top, fh - 1))
+            x1 = max(x0 + 1, min(rect.right, fw))
+            y1 = max(y0 + 1, min(rect.bottom, fh))
+        else:
+            sx, sy = fw / mon.width, fh / mon.height
+            x0 = int(round((rect.left - mon.left) * sx))
+            y0 = int(round((rect.top - mon.top) * sy))
+            x1 = int(round((rect.right - mon.left) * sx))
+            y1 = int(round((rect.bottom - mon.top) * sy))
+            x0 = max(0, min(x0, fw - 1))
+            y0 = max(0, min(y0, fh - 1))
+            x1 = max(x0 + 1, min(x1, fw))
+            y1 = max(y0 + 1, min(y1, fh))
+
+        sub = np.ascontiguousarray(frame[y0:y1, x0:x1])
+
+        if sub.shape[1] != rect.width or sub.shape[0] != rect.height:
+            sub = cv2.resize(sub, (rect.width, rect.height), interpolation=cv2.INTER_LINEAR)
+        return sub
 
     def close(self) -> None:
         try:
@@ -382,6 +420,24 @@ class ScreenGrabber:
                 img = self._backend.grab(rect)
                 if img is None or img.size == 0:
                     raise CaptureError("空帧")
+
+                # 尺寸校验。后端把坐标系或缩放搞错时会返回错误尺寸的图，
+                # 而**这种图的方差可能很高** —— 实测踩到：多显示器 + 显示缩放下，
+                # 裁剪坐标没减显示器原点，得到一条 1 像素宽的竖条，方差 91.7，
+                # 黑屏检测完全抓不到它，最后表现成"模板全都不匹配"，极难定位。
+                # 所以尺寸不符直接判定该后端有问题并换后端。
+                if img.shape[1] != rect.width or img.shape[0] != rect.height:
+                    self._log(
+                        f"后端 {self._backend.name} 返回尺寸不符: "
+                        f"期望 {rect.width}x{rect.height}，实得 {img.shape[1]}x{img.shape[0]}"
+                    )
+                    if self._degrade():
+                        continue
+                    raise CaptureError(
+                        f"帧尺寸不符: 期望 {rect.width}x{rect.height}，"
+                        f"实得 {img.shape[1]}x{img.shape[0]}"
+                    )
+
                 if attempt == 0 and is_blank(img) and self._backend.name != "printwindow":
                     # 首帧黑屏：可能是后端在这个游戏上失效，尝试降级
                     if self._degrade():

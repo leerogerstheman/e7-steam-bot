@@ -259,6 +259,12 @@ exe=F:\SteamLibrary\steamapps\common\Epic Seven Demo\EpicSeven_Steam.exe
 
 ### 7.3 ⭐ 诊断出 `code:101 网络连接异常` 的根因：加速器的 TLS 中间人
 
+> ⚠️ **本节结论后来被推翻了，见 §7.9。** 退出雷神后游戏**依然**报 `code:101`，
+> 真因是 **STOVE 的地区校验（`stove_error_not_supported_country`）**，
+> 由代理出口国（`device_nation`）决定。本节保留原样，是为了留下排查过程的完整轨迹 ——
+> 它记录的观测本身没错（雷神确实装了根证书、确实做 TLS 中间人），
+> 只是**不是本次故障的原因**。这也说明：现象对得上不等于因果成立。
+
 用户反馈"游戏没反应"。诊断过程与结论：
 
 **现象**：`doctor` 显示进程在跑、`Responding=True`、CPU 已用 419 秒、内存 817 MB；
@@ -435,3 +441,78 @@ mss 实测 **56~79 fps @1280×720**，对"每 2~3 秒识别一次场景"完全�
 > ⚠️ 别忘了：**日服玩家要连的是日本节点**。如果用 clash-verge 加速，
 > 记得把节点选到**日本**而不是韩国 —— 你之前那条连接去的是 `world_kor`（韩服）。
 > 但无论哪个服，**都不能用做 TLS 中间人的加速器**（见 §7.3）。
+
+### 7.9 ⭐⭐ `code:101` 的**真正**根因：STOVE 的地区校验，不是网络不通
+
+§7.3 把 `code:101` 归因于雷神加速器的 TLS 中间人 —— **那个结论是错的**。
+退出雷神、改用 clash 日本节点之后，游戏**依然** `code:101`。继续挖，才找到真因。
+
+#### 决定性证据在 STOVE 自己的日志里
+
+位置（这两处是关键，以后排查都从这儿开始）：
+
+```
+%LOCALAPPDATA%\STOVEPCCLIENTMODULE\logs\EpicSeven_Steam\APIModule_*.log
+%LOCALAPPDATA%\STOVEPCSDK3\logs\STOVE_EPIC7\BaseSDK_*.log
+```
+
+`BaseSDK` 日志末尾：
+
+```
+07:47:27.435  nation : JP            timeZone : Asia/Tokyo  utcOffset : 540
+07:47:27.436  nationality : SG       providerCode : STEAM_SHADOW
+07:47:27.436  memberNo : 251212253   nickname : S1791609014528511
+07:47:27.920  stringId=stove_error_not_supported_country,
+              translate=当前国家不支持此功能。
+07:47:27.920  ERROR This feature is not supported in the current country.
+```
+
+**`stove_error_not_supported_country` / 「当前国家不支持此功能」——
+这就是 `code:101` 的来源。不是连不上，是地区校验没过。**
+
+#### 关键：STOVE 的 `device_nation` 跟着**代理出口**走
+
+APIModule 日志里那条策略请求：
+
+```
+https://api.onstove.com/ngds/v1.1/client/policy/total
+    ?policy_grp=launcher&client_lang=zh&device_nation=SG
+```
+
+`device_nation=SG`（新加坡）—— 而用户当时的 clash 节点**名义上是日本，实际出口在新加坡**。
+后来换到真正的日本出口后，公网 IP 变成 `Japan (Tokyo) / FDCservers.net`。
+
+**所以：地区判定 = 代理出口 IP 的归属国，与账号无关。**
+选错节点 → `device_nation` 错 → 地区不支持 → `code:101`。
+
+#### 另一条重要证据：STOVE 层**全部成功**
+
+APIModule 日志显示启动链路一条都没失败：
+
+```
+ServerConfigService::RequestSync Success      PublicIpService: HTTP 200
+NGdsInformationService: code=0, message=OK    TranslateLanguageService Success (474896B)
+GameCheckerForSteamService: code=0, Success   provider_cd=STEAM_SHADOW
+FetchGameMetaService: code=0, message=OK      FetchGameInfoService: code=0, message=OK
+```
+
+**这直接排除了"网络不通"的假设** —— 如果线路有问题，这些请求会先失败。
+它们全成功，说明网络通畅，问题在**业务层的地区校验**。
+
+#### 还有一条线索：`[Restful] Proxy delegated to session AUTOMATIC_PROXY`
+
+STOVE SDK 的 HTTP 会话**会自动读系统代理**（WinINET）。所以：
+- 系统代理开着（clash 7897）→ STOVE 的请求走 clash → `device_nation` = clash 出口国
+- 游戏本体（cocos2d-x + libcurl）**不走系统代理**（exe 里虽有 `http_proxy` 等串，但环境变量没设）
+  → 两者走的线路**可能不一致**
+
+#### 方法论收获
+
+1. **先看应用自己的日志，再猜网络。** 我一开始从"连接 CloseWait / DNS 解析失败"往下推，
+   推出"网络不通"的错误结论；而日志里一句话就写明了真因。
+   **`%LOCALAPPDATA%\STOVE*\logs\` 是排查这个游戏的第一现场。**
+2. **"能下 CDN 但连不上游戏服"这个现象具有误导性。** CDN 是 Akamai（全球有节点，直连就通），
+   游戏 API 走的是另一条路。现象差异会让人以为是路由问题，实际是地区校验。
+3. **代理的"节点名"不等于出口国。** 标着日本、出口在新加坡，直接导致 `device_nation=SG`。
+   **验证方法**：`Invoke-RestMethod https://ip-api.com/json/` 看 `country`（注意 PowerShell
+   默认走系统代理，所以"直连"那次其实也走了 clash —— 要测真直连得显式指定不走代理）。
